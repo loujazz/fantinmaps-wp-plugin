@@ -1,0 +1,1 @@
+# fantinmaps-wp-plugin
