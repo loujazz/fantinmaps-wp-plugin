@@ -59,7 +59,7 @@
 		}
 		tokenClient = google.accounts.oauth2.initTokenClient( {
 			client_id : CLIENT_ID,
-			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email',
+			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/userinfo.email',
 			callback  : onTokenResponse,
 		} );
 	}
@@ -104,54 +104,141 @@
 	function loadMetadataJSON() {
 		renderLoading( 'Caricamento archivio in corso…' );
 
-		// Download the JSON file content via Drive API
+		// Step 1: check the file mimeType to decide how to fetch it
 		$.ajax( {
-			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( SHEET_ID ) + '?alt=media',
+			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( SHEET_ID ) + '?fields=id,name,mimeType',
 			headers : { Authorization: 'Bearer ' + state.accessToken },
-			success : function ( data ) {
-				var items = Array.isArray( data ) ? data : [];
-				state.photos = items.map( function ( item, idx ) {
-					// Build a display title: prefer desc, fall back to regione + tags
-					var title = ( item.desc && item.desc.trim() )
-						? item.desc.trim()
-						: ( item.regione || '' ) + ( item.tags && item.tags.length ? ' – ' + item.tags[ 0 ] : '' );
-					if ( ! title ) title = 'Foto CAI #' + ( idx + 1 );
-
-					// Author: explicit field or extract name from email
-					var author = item.author || ( item.uploadedBy ? item.uploadedBy.split( '@' )[ 0 ].replace( '.', ' ' ) : '' );
-
-					// Date: format uploadedAt to YYYY-MM-DD
-					var date = item.uploadedAt ? item.uploadedAt.substring( 0, 10 ) : '';
-
-					return {
-						index       : idx,
-						fileId      : item.id      || '',
-						src         : item.src     || '',
-						downloadUrl : item.downloadUrl || '',
-						title       : title,
-						description : item.desc    || '',
-						author      : author,
-						date        : date,
-						location    : item.regione || '',
-						lat         : item.lat     || null,
-						lon         : item.lon     || null,
-						tags        : Array.isArray( item.tags ) ? item.tags : [],
-						uploadedBy  : item.uploadedBy || '',
-					};
-				} ).filter( function ( p ) { return p.fileId; } );
-
-				state.filtered = state.photos.slice();
-				renderGrid();
+			success : function ( meta ) {
+				var mime = meta.mimeType || '';
+				if ( mime === 'application/vnd.google-apps.spreadsheet' ) {
+					loadFromSheet();
+				} else if ( mime === 'application/vnd.google-apps.folder' ) {
+					loadFromFolder();
+				} else {
+					// Raw binary file (JSON, etc.) – download directly
+					fetchRawJSON( SHEET_ID );
+				}
 			},
 			error : function ( xhr ) {
-				var msg = 'Errore durante il caricamento del JSON metadati.';
-				try {
-					var err = JSON.parse( xhr.responseText );
-					if ( err.error && err.error.message ) msg += ' ' + err.error.message;
-				} catch ( e ) {}
+				showError( 'Impossibile leggere i metadati del file Drive. Verifica i permessi.' );
+			},
+		} );
+	}
+
+	// Case A: file is a raw JSON binary on Drive
+	function fetchRawJSON( fileId ) {
+		$.ajax( {
+			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( fileId ) + '?alt=media',
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function ( data ) {
+				var items = Array.isArray( data ) ? data : ( data.photos || [] );
+				parseAndRender( items );
+			},
+			error : function ( xhr ) {
+				var msg = 'Errore nel download del JSON.';
+				try { msg += ' ' + JSON.parse( xhr.responseText ).error.message; } catch(e){}
 				showError( msg );
 			},
 		} );
+	}
+
+	// Case B: file is a Google Sheet – use Sheets API to read first sheet
+	function loadFromSheet() {
+		var url = 'https://sheets.googleapis.com/v4/spreadsheets/' +
+			encodeURIComponent( SHEET_ID ) + '/values/A2:K?majorDimension=ROWS';
+		$.ajax( {
+			url     : url,
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function ( data ) {
+				var rows = ( data && data.values ) ? data.values : [];
+				// Expected columns: A=id B=src C=downloadUrl D=lat E=lon F=regione G=desc H=tags I=uploadedBy J=uploadedAt K=author
+				var items = rows.map( function( r ) {
+					return {
+						id          : r[0] || '',
+						src         : r[1] || '',
+						downloadUrl : r[2] || '',
+						lat         : parseFloat( r[3] ) || null,
+						lon         : parseFloat( r[4] ) || null,
+						regione     : r[5] || '',
+						desc        : r[6] || '',
+						tags        : r[7] ? r[7].split( ',' ).map( function(t){ return t.trim(); } ) : [],
+						uploadedBy  : r[8] || '',
+						uploadedAt  : r[9] || '',
+						author      : r[10] || '',
+					};
+				} );
+				parseAndRender( items );
+			},
+			error : function() { showError( 'Errore lettura Google Sheet.' ); },
+		} );
+	}
+
+	// Case C: file is a Drive folder – load all JSON files inside it
+	function loadFromFolder() {
+		var url = 'https://www.googleapis.com/drive/v3/files' +
+			'?q=' + encodeURIComponent( '"' + SHEET_ID + '" in parents and mimeType="application/json" and trashed=false' ) +
+			'&fields=files(id,name)&pageSize=50';
+		$.ajax( {
+			url     : url,
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function( data ) {
+				var files = ( data && data.files ) ? data.files : [];
+				if ( ! files.length ) { showError( 'Nessun file JSON trovato nella cartella.' ); return; }
+				var allItems = [];
+				var done = 0;
+				files.forEach( function( f ) {
+					$.ajax( {
+						url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( f.id ) + '?alt=media',
+						headers : { Authorization: 'Bearer ' + state.accessToken },
+						success : function( d ) {
+							var arr = Array.isArray( d ) ? d : ( d.photos || [] );
+							allItems = allItems.concat( arr );
+						},
+						complete : function() {
+							done++;
+							if ( done === files.length ) parseAndRender( allItems );
+						},
+					} );
+				} );
+			},
+			error : function() { showError( 'Errore lettura cartella Drive.' ); },
+		} );
+	}
+
+	// Shared parser: convert raw items array → state.photos and render
+	function parseAndRender( items ) {
+		state.photos = items.map( function ( item, idx ) {
+			var title = ( item.desc && item.desc.trim() )
+				? item.desc.trim()
+				: ( item.regione || '' ) + ( item.tags && item.tags.length ? ' – ' + item.tags[ 0 ] : '' );
+			if ( ! title ) title = 'Foto CAI #' + ( idx + 1 );
+
+			var author = item.author || ( item.uploadedBy ? item.uploadedBy.split( '@' )[ 0 ].replace( /\./g, ' ' ) : '' );
+			var date   = item.uploadedAt ? item.uploadedAt.substring( 0, 10 ) : '';
+
+			return {
+				index       : idx,
+				fileId      : item.id      || '',
+				src         : item.src     || '',
+				downloadUrl : item.downloadUrl || '',
+				title       : title,
+				description : item.desc    || '',
+				author      : author,
+				date        : date,
+				location    : item.regione || '',
+				lat         : item.lat     || null,
+				lon         : item.lon     || null,
+				tags        : Array.isArray( item.tags ) ? item.tags : [],
+				uploadedBy  : item.uploadedBy || '',
+			};
+		} ).filter( function ( p ) { return p.fileId; } );
+
+		if ( ! state.photos.length ) {
+			showError( 'Archivio vuoto o formato non riconosciuto.' );
+			return;
+		}
+		state.filtered = state.photos.slice();
+		renderGrid();
 	}
 
 	/* ------------------------------------------------------------------ */
