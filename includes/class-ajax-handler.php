@@ -71,6 +71,8 @@ class FCAI_Ajax_Handler {
 		}
 
 		// Download the file content from Drive
+		$tmp_file = wp_tempnam( $filename );
+
 		$download_response = wp_remote_get(
 			'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?alt=media',
 			[
@@ -79,7 +81,7 @@ class FCAI_Ajax_Handler {
 				],
 				'timeout'  => 60,
 				'stream'   => true,
-				'filename' => self::get_tmp_path( $filename ),
+				'filename' => $tmp_file,
 			]
 		);
 
@@ -89,10 +91,9 @@ class FCAI_Ajax_Handler {
 
 		$dl_code = wp_remote_retrieve_response_code( $download_response );
 		if ( $dl_code !== 200 ) {
-			return new WP_Error( 'drive_download_failed', __( 'Download fallito dal Drive.', 'fantinmaps-cai' ), [ 'status' => $dl_code ] );
+			if ( file_exists( $tmp_file ) ) @unlink( $tmp_file );
+			return new WP_Error( 'drive_download_failed', __( 'Download fallito dal Drive. Codice: ', 'fantinmaps-cai' ) . $dl_code, [ 'status' => $dl_code ] );
 		}
-
-		$tmp_file = self::get_tmp_path( $filename );
 
 		if ( ! file_exists( $tmp_file ) || filesize( $tmp_file ) === 0 ) {
 			return new WP_Error( 'empty_file', __( 'File scaricato vuoto.', 'fantinmaps-cai' ), [ 'status' => 502 ] );
@@ -133,13 +134,4 @@ class FCAI_Ajax_Handler {
 		] );
 	}
 
-	/**
-	 * Returns a temporary file path in the WP uploads tmp directory.
-	 */
-	private static function get_tmp_path( string $filename ): string {
-		$upload_dir = wp_upload_dir();
-		$tmp_dir    = trailingslashit( $upload_dir['basedir'] ) . 'fcai-tmp';
-		wp_mkdir_p( $tmp_dir );
-		return trailingslashit( $tmp_dir ) . wp_unique_filename( $tmp_dir, $filename );
-	}
 }
