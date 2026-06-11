@@ -442,53 +442,39 @@
 	/* Media modal integration                                              */
 	/* ------------------------------------------------------------------ */
 
-	// We extend the MediaFrame.Post to inject our custom state.
-	var origInit = wp.media.view.MediaFrame.Post.prototype.initialize;
-	wp.media.view.MediaFrame.Post.prototype.initialize = function () {
-		origInit.apply( this, arguments );
-		addCAIState( this );
-	};
+	function patchMediaFrame( FrameClass ) {
+		var origInit = FrameClass.prototype.initialize;
+		FrameClass.prototype.initialize = function () {
+			origInit.apply( this, arguments );
 
-	// Also cover MediaFrame.Select (used by featured image / custom pickers)
-	var origInitSelect = wp.media.view.MediaFrame.Select.prototype.initialize;
-	wp.media.view.MediaFrame.Select.prototype.initialize = function () {
-		origInitSelect.apply( this, arguments );
-		addCAIState( this );
-	};
+			var frame = this;
 
-	function addCAIState( frame ) {
-		frame.states.add( [
-			new wp.media.controller.State( {
+			// Guard: don't add twice if frame is reused
+			if ( frame.states.get( 'cai-archive' ) ) {
+				return;
+			}
+
+			// WP automatically adds a menu item for every state that has
+			// menu:'default' and a title — no manual menu.set() needed.
+			frame.states.add( new wp.media.controller.State( {
 				id      : 'cai-archive',
 				title   : '📷 Archivio CAI',
-				content : 'cai-archive',
 				menu    : 'default',
+				content : 'cai-archive',
 				toolbar : 'select',
 				router  : false,
-			} ),
-		] );
+			} ) );
 
-		frame.on( 'content:create:cai-archive', function ( content ) {
-			var view = new wp.media.View( { controller: frame } );
-			view.el.appendChild( getPanel()[ 0 ] );
-			content.view = view;
-		}, frame );
-
-		// Add menu item
-		frame.on( 'menu:create:default', function ( menu ) {
-			menu.set( 'cai-archive', {
-				text     : '📷 Archivio CAI',
-				priority : 60,
-			} );
-		} );
-
-		frame.on( 'menu:render:default', function ( view ) {
-			view.set( 'cai-archive', {
-				text     : '📷 Archivio CAI',
-				priority : 60,
-			} );
-		} );
+			frame.on( 'content:create:cai-archive', function ( content ) {
+				var view = new wp.media.View( { controller: frame } );
+				view.$el.addClass( 'fcai-content-wrap' ).append( getPanel() );
+				content.view = view;
+			}, frame );
+		};
 	}
+
+	patchMediaFrame( wp.media.view.MediaFrame.Post );
+	patchMediaFrame( wp.media.view.MediaFrame.Select );
 
 	/* ------------------------------------------------------------------ */
 	/* Bootstrap Google Identity Services after DOM ready                  */
