@@ -28,15 +28,8 @@
 	var CLIENT_ID     = settings.googleClientId;
 	var ALLOWED_DOMAIN = settings.allowedDomain;
 
-	// Expected Google Sheet columns (0-based):
-	// A  = drive_file_id
-	// B  = title
-	// C  = description
-	// D  = author
-	// E  = date
-	// F  = location
-	// G  = tags (comma-separated)
-	var COL = { FILE_ID: 0, TITLE: 1, DESCRIPTION: 2, AUTHOR: 3, DATE: 4, LOCATION: 5, TAGS: 6 };
+	// JSON schema (from Drive file):
+	// { id, src, downloadUrl, lat, lon, regione, desc, tags[], uploadedBy, uploadedAt, author? }
 
 	/* ------------------------------------------------------------------ */
 	/* State                                                                */
@@ -66,7 +59,7 @@
 		}
 		tokenClient = google.accounts.oauth2.initTokenClient( {
 			client_id : CLIENT_ID,
-			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/userinfo.email',
+			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email',
 			callback  : onTokenResponse,
 		} );
 	}
@@ -96,7 +89,7 @@
 				}
 				state.userEmail = email;
 				renderLoggedIn( email );
-				loadMetadataSheet();
+				loadMetadataJSON();
 			},
 			error : function () {
 				showError( 'Impossibile verificare l\'identità Google.' );
@@ -105,31 +98,45 @@
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Google Sheets – metadata                                             */
+	/* Google Drive – JSON metadata file                                   */
 	/* ------------------------------------------------------------------ */
 
-	function loadMetadataSheet() {
+	function loadMetadataJSON() {
 		renderLoading( 'Caricamento archivio in corso…' );
 
-		var url = 'https://sheets.googleapis.com/v4/spreadsheets/' +
-			encodeURIComponent( SHEET_ID ) +
-			'/values/A2:G?majorDimension=ROWS';
-
+		// Download the JSON file content via Drive API
 		$.ajax( {
-			url     : url,
+			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( SHEET_ID ) + '?alt=media',
 			headers : { Authorization: 'Bearer ' + state.accessToken },
 			success : function ( data ) {
-				var rows = ( data && data.values ) ? data.values : [];
-				state.photos = rows.map( function ( row, idx ) {
+				var items = Array.isArray( data ) ? data : [];
+				state.photos = items.map( function ( item, idx ) {
+					// Build a display title: prefer desc, fall back to regione + tags
+					var title = ( item.desc && item.desc.trim() )
+						? item.desc.trim()
+						: ( item.regione || '' ) + ( item.tags && item.tags.length ? ' – ' + item.tags[ 0 ] : '' );
+					if ( ! title ) title = 'Foto CAI #' + ( idx + 1 );
+
+					// Author: explicit field or extract name from email
+					var author = item.author || ( item.uploadedBy ? item.uploadedBy.split( '@' )[ 0 ].replace( '.', ' ' ) : '' );
+
+					// Date: format uploadedAt to YYYY-MM-DD
+					var date = item.uploadedAt ? item.uploadedAt.substring( 0, 10 ) : '';
+
 					return {
 						index       : idx,
-						fileId      : row[ COL.FILE_ID ]      || '',
-						title       : row[ COL.TITLE ]        || 'Senza titolo',
-						description : row[ COL.DESCRIPTION ]  || '',
-						author      : row[ COL.AUTHOR ]       || '',
-						date        : row[ COL.DATE ]         || '',
-						location    : row[ COL.LOCATION ]     || '',
-						tags        : ( row[ COL.TAGS ] || '' ).split( ',' ).map( function ( t ) { return t.trim(); } ),
+						fileId      : item.id      || '',
+						src         : item.src     || '',
+						downloadUrl : item.downloadUrl || '',
+						title       : title,
+						description : item.desc    || '',
+						author      : author,
+						date        : date,
+						location    : item.regione || '',
+						lat         : item.lat     || null,
+						lon         : item.lon     || null,
+						tags        : Array.isArray( item.tags ) ? item.tags : [],
+						uploadedBy  : item.uploadedBy || '',
 					};
 				} ).filter( function ( p ) { return p.fileId; } );
 
@@ -137,8 +144,11 @@
 				renderGrid();
 			},
 			error : function ( xhr ) {
-				var msg = 'Errore durante il caricamento del foglio metadati.';
-				try { msg += ' ' + JSON.parse( xhr.responseText ).error.message; } catch ( e ) {}
+				var msg = 'Errore durante il caricamento del JSON metadati.';
+				try {
+					var err = JSON.parse( xhr.responseText );
+					if ( err.error && err.error.message ) msg += ' ' + err.error.message;
+				} catch ( e ) {}
 				showError( msg );
 			},
 		} );
@@ -239,8 +249,10 @@
 		state.filtered = state.photos.filter( function ( p ) {
 			return (
 				p.title.toLowerCase().indexOf( q ) !== -1 ||
+				p.description.toLowerCase().indexOf( q ) !== -1 ||
 				p.author.toLowerCase().indexOf( q ) !== -1 ||
 				p.location.toLowerCase().indexOf( q ) !== -1 ||
+				p.uploadedBy.toLowerCase().indexOf( q ) !== -1 ||
 				p.tags.join( ' ' ).toLowerCase().indexOf( q ) !== -1
 			);
 		} );
@@ -262,7 +274,8 @@
 
 		var html = '<div class="fcai-grid">';
 		subset.forEach( function ( photo ) {
-			var thumbUrl = 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w200';
+			// Prefer the src URL from JSON (already a Drive direct link); fall back to thumbnail API
+		var thumbUrl = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w200' );
 			var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
 			html +=
 				'<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
@@ -318,19 +331,24 @@
 
 		var credits = buildCredits( photo );
 
+		var previewSrc = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w400' );
+		var coordsText = ( photo.lat && photo.lon ) ? photo.lat.toFixed( 5 ) + ', ' + photo.lon.toFixed( 5 ) : '';
+
 		$detail.show().html(
 			'<div class="fcai-detail-inner">' +
 			'  <div class="fcai-detail-thumb">' +
-			'    <img src="https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w400" alt="' + escAttr( photo.title ) + '" />' +
+			'    <img src="' + escAttr( previewSrc ) + '" alt="' + escAttr( photo.title ) + '" />' +
 			'  </div>' +
 			'  <div class="fcai-detail-meta">' +
 			'    <h3>' + escHtml( photo.title ) + '</h3>' +
 			'    <table class="fcai-meta-table">' +
-			( photo.author   ? '<tr><th>Autore</th><td>' + escHtml( photo.author ) + '</td></tr>'   : '' ) +
-			( photo.date     ? '<tr><th>Data</th><td>'   + escHtml( photo.date )   + '</td></tr>'   : '' ) +
-			( photo.location ? '<tr><th>Luogo</th><td>'  + escHtml( photo.location ) + '</td></tr>' : '' ) +
+			( photo.author      ? '<tr><th>Autore</th><td>'    + escHtml( photo.author )      + '</td></tr>' : '' ) +
+			( photo.uploadedBy  ? '<tr><th>Caricato da</th><td>' + escHtml( photo.uploadedBy ) + '</td></tr>' : '' ) +
+			( photo.date        ? '<tr><th>Data</th><td>'      + escHtml( photo.date )        + '</td></tr>' : '' ) +
+			( photo.location    ? '<tr><th>Regione</th><td>'   + escHtml( photo.location )    + '</td></tr>' : '' ) +
 			( photo.description ? '<tr><th>Descrizione</th><td>' + escHtml( photo.description ) + '</td></tr>' : '' ) +
-			( photo.tags.length ? '<tr><th>Tag</th><td>' + escHtml( photo.tags.join( ', ' ) ) + '</td></tr>' : '' ) +
+			( coordsText        ? '<tr><th>Coordinate</th><td>' + escHtml( coordsText )        + '</td></tr>' : '' ) +
+			( photo.tags.length ? '<tr><th>Tag</th><td>'       + escHtml( photo.tags.join( ', ' ) ) + '</td></tr>' : '' ) +
 			'    </table>' +
 			'    <div class="fcai-credits-preview">' +
 			'      <strong>Crediti precompilati:</strong><br>' +
@@ -350,9 +368,11 @@
 
 	function buildCredits( photo ) {
 		var parts = [ 'FantinMaps / CAI' ];
-		if ( photo.author )   parts.push( 'Foto: ' + photo.author );
-		if ( photo.date )     parts.push( photo.date );
+		// Use explicit author, or derive readable name from email
+		var credit = photo.author || photo.uploadedBy;
+		if ( credit ) parts.push( 'Foto: ' + credit );
 		if ( photo.location ) parts.push( photo.location );
+		if ( photo.date )     parts.push( photo.date );
 		return parts.join( ' – ' );
 	}
 
@@ -384,7 +404,7 @@
 				access_token  : state.accessToken,
 				title         : photo.title,
 				caption       : credits,
-				alt_text      : photo.title + ' – ' + ( photo.author || 'CAI' ),
+				alt_text      : photo.title + ( photo.location ? ' – ' + photo.location : '' ),
 				filename      : filename,
 			} ),
 			beforeSend : function ( xhr ) {
