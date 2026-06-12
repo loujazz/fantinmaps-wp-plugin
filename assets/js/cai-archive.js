@@ -520,6 +520,104 @@
 		} );
 	}
 
+	/**
+	 * After import, insert the new attachment into the current editing context:
+	 * - Featured image panel  → sets it as featured image
+	 * - Gutenberg block       → inserts image block via block editor store
+	 * - Classic editor        → inserts via wp.media.editor.insert()
+	 * - Generic media frame   → selects the attachment and closes the modal
+	 *
+	 * Calls callback( true ) if successfully inserted into the post,
+	 * callback( false ) if only added to media library.
+	 */
+	function insertAttachmentIntoContext( attachmentId, callback ) {
+		var attachment = wp.media.attachment( attachmentId );
+
+		attachment.fetch( {
+			success: function () {
+				var frame   = wp.media.frame;
+				var handled = false;
+
+				// ── 1. Featured image context ────────────────────────────────
+				if ( frame && frame.options && frame.options.state === 'featured-image' ) {
+					var postId = wp.media.view.settings.post && wp.media.view.settings.post.id;
+					if ( postId ) {
+						wp.media.featuredImage.set( attachmentId );
+						// Update the featured image thumbnail in the sidebar
+						$( '#set-post-thumbnail' ).find( 'img' ).replaceWith(
+							$( '<img>', { src: attachment.get( 'url' ), style: 'max-width:100%' } )
+						);
+						handled = true;
+					}
+				}
+
+				// ── 2. Gutenberg block editor ────────────────────────────────
+				if ( ! handled && window.wp && wp.data && wp.data.select( 'core/editor' ) ) {
+					try {
+						var selectedBlock = wp.data.select( 'core/block-editor' ).getSelectedBlock();
+						// If a specific image block is selected and empty, replace it
+						if ( selectedBlock && selectedBlock.name === 'core/image' && ! selectedBlock.attributes.id ) {
+							wp.data.dispatch( 'core/block-editor' ).updateBlockAttributes(
+								selectedBlock.clientId,
+								{ id: attachmentId, url: attachment.get( 'url' ), alt: attachment.get( 'alt' ) }
+							);
+						} else {
+							// Insert a new image block at the current cursor position
+							var block = wp.blocks.createBlock( 'core/image', {
+								id  : attachmentId,
+								url : attachment.get( 'url' ),
+								alt : attachment.get( 'alt' ) || attachment.get( 'title' ),
+								caption : attachment.get( 'caption' ) || '',
+							} );
+							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+						}
+						handled = true;
+					} catch ( e ) {
+						// Gutenberg not available or error – fall through
+					}
+				}
+
+				// ── 3. Classic editor (TinyMCE / wp.media.editor) ────────────
+				if ( ! handled && window.wp && wp.media.editor && wp.media.editor.insert ) {
+					try {
+						var imgHtml = wp.media.string.image( {
+							model : attachment,
+							size  : 'large',
+						} );
+						wp.media.editor.insert( imgHtml );
+						handled = true;
+					} catch ( e ) {
+						// Classic editor not available – fall through
+					}
+				}
+
+				// ── 4. Generic frame: select attachment and close ────────────
+				if ( ! handled && frame && frame.state ) {
+					try {
+						var selection = frame.state().get( 'selection' );
+						if ( selection ) {
+							selection.reset( [ attachment ] );
+							if ( frame.state().get( 'library' ) ) {
+								frame.setState( 'insert' );
+							}
+							handled = true;
+						}
+					} catch ( e ) {}
+				}
+
+				// Close the modal after a short delay so the user sees the status message
+				setTimeout( function () {
+					if ( frame ) { try { frame.close(); } catch(e){} }
+				}, 800 );
+
+				callback( handled );
+			},
+			error: function () {
+				callback( false );
+			},
+		} );
+	}
+
 	function buildCredits( photo ) {
 		var parts = [ 'FantinMaps / CAI' ];
 		// Use explicit author, or derive readable name from email
@@ -568,20 +666,11 @@
 			success : function ( resp ) {
 				state.importing = false;
 				$btn.prop( 'disabled', false ).text( '⬇ Importa nella libreria media' );
-				$status.text( '✅ Importata! (ID: ' + resp.id + ')' );
+				$status.text( '✅ Importata! Inserimento in corso…' );
 
-				// Notify WP media modal of the new attachment so it can be
-				// selected immediately (works when the modal is open in "select" mode)
-				if ( wp.media.frame && wp.media.frame.state ) {
-					var selection = wp.media.frame.state().get( 'selection' );
-					if ( selection ) {
-						var attachment = wp.media.attachment( resp.id );
-						attachment.fetch( { success : function () {
-							selection.reset( [ attachment ] );
-							wp.media.frame.close();
-						} } );
-					}
-				}
+				insertAttachmentIntoContext( resp.id, function ( inserted ) {
+					$status.text( inserted ? '✅ Inserita nell\'articolo!' : '✅ Importata nella libreria media (ID: ' + resp.id + ')' );
+				} );
 			},
 			error : function ( xhr ) {
 				state.importing = false;
