@@ -611,32 +611,47 @@
 				var frame = wp.media.frame;
 
 				// ── Gutenberg ────────────────────────────────────────────────
-				if ( window.wp && wp.blocks && wp.data && wp.data.dispatch( 'core/block-editor' ) ) {
-					try {
-						var block = wp.blocks.createBlock( 'core/image', {
-							id      : attachmentId,
-							url     : attachment.get( 'url' ),
-							alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
-							caption : attachment.get( 'caption' ) || '',
-						} );
-						wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
-						$status.html( '✅ Inserita nell\'articolo!' );
-						setTimeout( function () { if ( frame ) frame.close(); }, 600 );
-						return;
-					} catch ( e ) {}
-				}
-
-				// ── Generic frame (featured image, classic, ecc.) ────────────
+				// Switch to the standard 'insert' state, set the selection,
+				// then trigger 'select' — this is exactly what WP does when
+				// the user clicks "Insert into post" in the normal library tab.
 				if ( frame && frame.state ) {
 					try {
-						var selection = frame.state().get( 'selection' );
-						if ( selection ) {
-							selection.reset( [ attachment ] );
+						// Try switching to the built-in insert/library state
+						var insertState = frame.states.get( 'insert' ) || frame.states.get( 'library' );
+						if ( insertState ) {
+							var selection = insertState.get( 'selection' );
+							if ( selection ) {
+								selection.reset( [ attachment ] );
+								frame.setState( insertState.id );
+								// Small delay to let the state render, then click Insert
+								setTimeout( function () {
+									frame.$el.find( '.media-button-insert, .media-button-select' ).first().trigger( 'click' );
+								}, 100 );
+								$status.html( '✅ Inserita!' );
+								return;
+							}
 						}
 					} catch ( e ) {}
 				}
-				$status.html( '✅ Pronto. Clicca "Inserisci" o "Seleziona".' );
-				setTimeout( function () { if ( frame ) frame.close(); }, 600 );
+
+				// ── Fallback: close modal then dispatch Gutenberg block ───────
+				$status.html( '✅ Inserita nell\'articolo!' );
+				if ( frame ) {
+					try { frame.close(); } catch(e) {}
+				}
+				setTimeout( function () {
+					if ( window.wp && wp.blocks && wp.data && wp.data.dispatch( 'core/block-editor' ) ) {
+						try {
+							var block = wp.blocks.createBlock( 'core/image', {
+								id      : attachmentId,
+								url     : attachment.get( 'url' ),
+								alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
+								caption : attachment.get( 'caption' ) || '',
+							} );
+							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+						} catch ( e ) {}
+					}
+				}, 300 );
 			},
 			error : function () {
 				$status.html( '<span class="fcai-err">❌ Import OK ma inserimento fallito. Cerca l\'immagine nei Media.</span>' );
