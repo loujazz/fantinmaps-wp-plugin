@@ -225,12 +225,17 @@
 }
 
 #fcai-import-btn {
-	margin-right: 10px;
+	margin-bottom: 8px;
+	display: block;
 }
 
-#fcai-import-status {
+.fcai-import-status {
 	font-size: 13px;
-	vertical-align: middle;
+	min-height: 20px;
+}
+
+.fcai-import-status .fcai-err {
+	color: #d63638;
 }
 
 /* ── View toggle button ── */

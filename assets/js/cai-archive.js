@@ -301,7 +301,8 @@
 		$panel.append( '<div id="fcai-pager" class="fcai-pager"></div>' );
 		$panel.append( '<div id="fcai-detail" class="fcai-detail" style="display:none;"></div>' );
 
-		$panel.find( '#fcai-signout-btn' ).on( 'click', function () {
+		// Use event delegation on $panel so handlers survive DOM updates
+		$panel.on( 'click', '#fcai-signout-btn', function () {
 			state.accessToken = null;
 			state.userEmail   = null;
 			state.photos      = [];
@@ -310,7 +311,7 @@
 			renderLoginScreen();
 		} );
 
-		$panel.find( '#fcai-search' ).on( 'input', debounce( function () {
+		$panel.on( 'input', '#fcai-search', debounce( function () {
 			state.searchQuery = $( this ).val().toLowerCase();
 			state.page = 1;
 			applyFilter();
@@ -321,7 +322,7 @@
 			}
 		}, 300 ) );
 
-		$panel.find( '#fcai-view-toggle' ).on( 'click', function () {
+		$panel.on( 'click', '#fcai-view-toggle', function () {
 			if ( state.viewMode === 'grid' ) {
 				switchToMap();
 			} else {
@@ -512,8 +513,8 @@
 			'      <strong>Crediti precompilati:</strong><br>' +
 			'      <em>' + escHtml( credits ) + '</em>' +
 			'    </div>' +
-			'    <button id="fcai-import-btn" class="button button-primary button-large">⬇ Importa nella libreria media</button>' +
-			'    <span id="fcai-import-status"></span>' +
+			'    <button id="fcai-import-btn" class="button button-primary button-large">📥 Inserisci nell\'articolo</button>' +
+			'    <div id="fcai-import-status" class="fcai-import-status"></div>' +
 			'  </div>' +
 			'</div>'
 		);
@@ -530,113 +531,14 @@
 			}
 		}
 
-		$detail.find( '#fcai-import-btn' ).on( 'click', function () {
+		$panel.on( 'click', '#fcai-import-btn', function () {
 			if ( state.importing ) return;
 			importPhoto( photo );
 		} );
 	}
 
-	/**
-	 * After import, insert the new attachment into the current editing context:
-	 * - Featured image panel  → sets it as featured image
-	 * - Gutenberg block       → inserts image block via block editor store
-	 * - Classic editor        → inserts via wp.media.editor.insert()
-	 * - Generic media frame   → selects the attachment and closes the modal
-	 *
-	 * Calls callback( true ) if successfully inserted into the post,
-	 * callback( false ) if only added to media library.
-	 */
-	function insertAttachmentIntoContext( attachmentId, callback ) {
-		var attachment = wp.media.attachment( attachmentId );
-
-		attachment.fetch( {
-			success: function () {
-				var frame   = wp.media.frame;
-				var handled = false;
-
-				// ── 1. Featured image context ────────────────────────────────
-				if ( frame && frame.options && frame.options.state === 'featured-image' ) {
-					var postId = wp.media.view.settings.post && wp.media.view.settings.post.id;
-					if ( postId ) {
-						wp.media.featuredImage.set( attachmentId );
-						// Update the featured image thumbnail in the sidebar
-						$( '#set-post-thumbnail' ).find( 'img' ).replaceWith(
-							$( '<img>', { src: attachment.get( 'url' ), style: 'max-width:100%' } )
-						);
-						handled = true;
-					}
-				}
-
-				// ── 2. Gutenberg block editor ────────────────────────────────
-				if ( ! handled && window.wp && wp.data && wp.data.select( 'core/editor' ) ) {
-					try {
-						var selectedBlock = wp.data.select( 'core/block-editor' ).getSelectedBlock();
-						// If a specific image block is selected and empty, replace it
-						if ( selectedBlock && selectedBlock.name === 'core/image' && ! selectedBlock.attributes.id ) {
-							wp.data.dispatch( 'core/block-editor' ).updateBlockAttributes(
-								selectedBlock.clientId,
-								{ id: attachmentId, url: attachment.get( 'url' ), alt: attachment.get( 'alt' ) }
-							);
-						} else {
-							// Insert a new image block at the current cursor position
-							var block = wp.blocks.createBlock( 'core/image', {
-								id  : attachmentId,
-								url : attachment.get( 'url' ),
-								alt : attachment.get( 'alt' ) || attachment.get( 'title' ),
-								caption : attachment.get( 'caption' ) || '',
-							} );
-							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
-						}
-						handled = true;
-					} catch ( e ) {
-						// Gutenberg not available or error – fall through
-					}
-				}
-
-				// ── 3. Classic editor (TinyMCE / wp.media.editor) ────────────
-				if ( ! handled && window.wp && wp.media.editor && wp.media.editor.insert ) {
-					try {
-						var imgHtml = wp.media.string.image( {
-							model : attachment,
-							size  : 'large',
-						} );
-						wp.media.editor.insert( imgHtml );
-						handled = true;
-					} catch ( e ) {
-						// Classic editor not available – fall through
-					}
-				}
-
-				// ── 4. Generic frame: select attachment and close ────────────
-				if ( ! handled && frame && frame.state ) {
-					try {
-						var selection = frame.state().get( 'selection' );
-						if ( selection ) {
-							selection.reset( [ attachment ] );
-							if ( frame.state().get( 'library' ) ) {
-								frame.setState( 'insert' );
-							}
-							handled = true;
-						}
-					} catch ( e ) {}
-				}
-
-				// Close the modal after a short delay so the user sees the status message
-				setTimeout( function () {
-					if ( frame ) { try { frame.close(); } catch(e){} }
-				}, 800 );
-
-				callback( handled );
-			},
-			error: function () {
-				callback( false );
-			},
-		} );
-	}
-
 	function buildCredits( photo ) {
 		var parts = [ 'FantinMaps / CAI' ];
-		// Use explicit author, or derive readable name from email
 		var credit = photo.author || photo.uploadedBy;
 		if ( credit ) parts.push( 'Foto: ' + credit );
 		if ( photo.location ) parts.push( photo.location );
@@ -645,7 +547,7 @@
 	}
 
 	/* ------------------------------------------------------------------ */
-	/* Import                                                               */
+	/* Import + insert                                                      */
 	/* ------------------------------------------------------------------ */
 
 	function importPhoto( photo ) {
@@ -657,8 +559,8 @@
 		state.importing = true;
 		var $btn    = $( '#fcai-import-btn' );
 		var $status = $( '#fcai-import-status' );
-		$btn.prop( 'disabled', true ).text( '⏳ Importazione…' );
-		$status.text( '' );
+		$btn.prop( 'disabled', true ).text( '⏳ Download in corso…' );
+		$status.html( '' );
 
 		var credits  = buildCredits( photo );
 		var filename = sanitizeFilename( photo.title || photo.fileId ) + '.jpg';
@@ -681,19 +583,59 @@
 			},
 			success : function ( resp ) {
 				state.importing = false;
-				$btn.prop( 'disabled', false ).text( '⬇ Importa nella libreria media' );
-				$status.text( '✅ Importata! Inserimento in corso…' );
-
-				insertAttachmentIntoContext( resp.id, function ( inserted ) {
-					$status.text( inserted ? '✅ Inserita nell\'articolo!' : '✅ Importata nella libreria media (ID: ' + resp.id + ')' );
-				} );
+				$btn.prop( 'disabled', false ).text( '📥 Inserisci nell\'articolo' );
+				$status.html( '⏳ Inserimento in corso…' );
+				insertIntoPost( resp.id, $status );
 			},
 			error : function ( xhr ) {
 				state.importing = false;
-				$btn.prop( 'disabled', false ).text( '⬇ Importa nella libreria media' );
-				var msg = 'Errore durante l\'importazione.';
-				try { msg += ' ' + JSON.parse( xhr.responseText ).message; } catch ( e ) {}
-				$status.text( '❌ ' + msg );
+				$btn.prop( 'disabled', false ).text( '📥 Inserisci nell\'articolo' );
+				var msg = 'Errore durante il download.';
+				try {
+					var body = JSON.parse( xhr.responseText );
+					if ( body.message ) msg = body.message;
+				} catch ( e ) {}
+				$status.html( '<span class="fcai-err">❌ ' + escHtml( msg ) + '</span>' );
+			},
+		} );
+	}
+
+	function insertIntoPost( attachmentId, $status ) {
+		var attachment = wp.media.attachment( attachmentId );
+		attachment.fetch( {
+			success : function () {
+				var frame = wp.media.frame;
+
+				// ── Gutenberg ────────────────────────────────────────────────
+				if ( window.wp && wp.blocks && wp.data && wp.data.dispatch( 'core/block-editor' ) ) {
+					try {
+						var block = wp.blocks.createBlock( 'core/image', {
+							id      : attachmentId,
+							url     : attachment.get( 'url' ),
+							alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
+							caption : attachment.get( 'caption' ) || '',
+						} );
+						wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+						$status.html( '✅ Inserita nell\'articolo!' );
+						setTimeout( function () { if ( frame ) frame.close(); }, 600 );
+						return;
+					} catch ( e ) {}
+				}
+
+				// ── Generic frame (featured image, classic, ecc.) ────────────
+				if ( frame && frame.state ) {
+					try {
+						var selection = frame.state().get( 'selection' );
+						if ( selection ) {
+							selection.reset( [ attachment ] );
+						}
+					} catch ( e ) {}
+				}
+				$status.html( '✅ Pronto. Clicca "Inserisci" o "Seleziona".' );
+				setTimeout( function () { if ( frame ) frame.close(); }, 600 );
+			},
+			error : function () {
+				$status.html( '<span class="fcai-err">❌ Import OK ma inserimento fallito. Cerca l\'immagine nei Media.</span>' );
 			},
 		} );
 	}
