@@ -367,7 +367,9 @@
 		if ( ! $container.length ) return;
 
 		if ( state.filtered.length === 0 ) {
-			$container.html( '<div class="fcai-empty">Nessuna foto trovata.</div>' );
+			$container.html( '<div class="fcai-empty">Nessuna foto trovata' +
+				( state.searchQuery ? ' per "<strong>' + escHtml( state.searchQuery ) + '</strong>"' : '' ) +
+				'.</div>' );
 			$( '#fcai-pager' ).html( '' );
 			return;
 		}
@@ -388,20 +390,21 @@
 		html += '</div>';
 		$container.html( html );
 
-		// Load thumbnails via authenticated fetch (img tags can't send Authorization headers)
+		// Load thumbnails via authenticated fetch
 		$container.find( 'img.fcai-thumb-img' ).each( function () {
 			loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
 		} );
 
-		// Click on thumbnail → show detail panel
-		$container.find( '.fcai-thumb' ).on( 'click', function () {
-			var idx  = parseInt( $( this ).data( 'index' ), 10 );
+		// Click on thumbnail (delegated — survives re-render)
+		$container.off( 'click', '.fcai-thumb' ).on( 'click', '.fcai-thumb', function () {
+			var idx   = parseInt( $( this ).data( 'index' ), 10 );
 			var photo = state.photos[ idx ];
 			if ( ! photo ) return;
 			state.selected = photo;
 			$container.find( '.fcai-thumb' ).removeClass( 'fcai-selected' );
 			$( this ).addClass( 'fcai-selected' );
 			renderDetail( photo );
+			$( '#fcai-detail' )[ 0 ] && $( '#fcai-detail' )[ 0 ].scrollIntoView( { behavior: 'smooth', block: 'start' } );
 		} );
 
 		renderPager();
@@ -765,8 +768,9 @@
 		state.viewMode = 'grid';
 		$( '#fcai-view-toggle' ).text( '🗺️ Mappa' ).attr( 'title', 'Passa alla mappa' );
 		$( '#fcai-map-container' ).hide();
-		$( '#fcai-grid-container' ).show();
 		$( '#fcai-pager' ).show();
+		$( '#fcai-grid-container' ).show();
+		$( '#fcai-detail' ).hide();
 		renderGrid();
 	}
 
@@ -786,17 +790,24 @@
 			return p.lat && p.lon;
 		} );
 
-		// Init map once
-		if ( ! leafletMap ) {
+		// Remove stale "no results" overlay if present
+		$container.find( '.fcai-map-overlay' ).remove();
+
+		// Init map if needed — or if the #fcai-leaflet div was wiped, rebuild it
+		var leafletEl = document.getElementById( 'fcai-leaflet' );
+		if ( ! leafletMap || ! leafletEl ) {
+			// Destroy stale instance if DOM was wiped
+			if ( leafletMap ) {
+				try { leafletMap.remove(); } catch(e){}
+				leafletMap = null;
+				markerCluster = null;
+			}
 			$container.html( '<div id="fcai-leaflet" class="fcai-leaflet"></div>' );
-
 			leafletMap = L.map( 'fcai-leaflet', { zoomControl: true } );
-
 			L.tileLayer( 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 				attribution : '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
 				maxZoom     : 18,
 			} ).addTo( leafletMap );
-
 			markerCluster = L.markerClusterGroup( {
 				showCoverageOnHover : false,
 				maxClusterRadius    : 50,
@@ -806,8 +817,13 @@
 			markerCluster.clearLayers();
 		}
 
+		// Show overlay for no results WITHOUT destroying the map DOM
 		if ( ! photos.length ) {
-			$container.html( '<div class="fcai-empty">Nessuna foto con coordinate GPS trovata.</div>' );
+			$container.append(
+				'<div class="fcai-map-overlay fcai-empty">Nessuna foto trovata' +
+				( state.searchQuery ? ' per "<strong>' + escHtml( state.searchQuery ) + '</strong>"' : ' con coordinate GPS' ) +
+				'.</div>'
+			);
 			return;
 		}
 

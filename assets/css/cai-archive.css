@@ -313,6 +313,24 @@
 	width: 100%;
 }
 
+/* ── Map no-results overlay (doesn't destroy Leaflet DOM) ── */
+.fcai-map-overlay {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate( -50%, -50% );
+	background: rgba(255,255,255,0.92);
+	border: 1px solid #ddd;
+	border-radius: 6px;
+	padding: 12px 20px;
+	z-index: 1000;
+	pointer-events: none;
+}
+
+#fcai-map-container {
+	position: relative;
+}
+
 /* ── State messages ── */
 .fcai-loading,
 .fcai-empty,
