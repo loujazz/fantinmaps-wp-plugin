@@ -38,13 +38,14 @@
 	var state = {
 		accessToken : null,
 		userEmail   : null,
-		photos      : [],      // parsed from Sheet
+		photos      : [],      // parsed from Drive
 		filtered    : [],      // after search
 		selected    : null,    // { fileId, title, … }
 		importing   : false,
 		page        : 1,
 		perPage     : 30,
 		searchQuery : '',
+		viewMode    : 'grid',  // 'grid' | 'map'
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -59,7 +60,7 @@
 		}
 		tokenClient = google.accounts.oauth2.initTokenClient( {
 			client_id : CLIENT_ID,
-			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/userinfo.email',
+			scope     : 'https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/userinfo.email',
 			callback  : onTokenResponse,
 		} );
 	}
@@ -104,54 +105,141 @@
 	function loadMetadataJSON() {
 		renderLoading( 'Caricamento archivio in corso…' );
 
-		// Download the JSON file content via Drive API
+		// Step 1: check the file mimeType to decide how to fetch it
 		$.ajax( {
-			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( SHEET_ID ) + '?alt=media',
+			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( SHEET_ID ) + '?fields=id,name,mimeType',
 			headers : { Authorization: 'Bearer ' + state.accessToken },
-			success : function ( data ) {
-				var items = Array.isArray( data ) ? data : [];
-				state.photos = items.map( function ( item, idx ) {
-					// Build a display title: prefer desc, fall back to regione + tags
-					var title = ( item.desc && item.desc.trim() )
-						? item.desc.trim()
-						: ( item.regione || '' ) + ( item.tags && item.tags.length ? ' – ' + item.tags[ 0 ] : '' );
-					if ( ! title ) title = 'Foto CAI #' + ( idx + 1 );
-
-					// Author: explicit field or extract name from email
-					var author = item.author || ( item.uploadedBy ? item.uploadedBy.split( '@' )[ 0 ].replace( '.', ' ' ) : '' );
-
-					// Date: format uploadedAt to YYYY-MM-DD
-					var date = item.uploadedAt ? item.uploadedAt.substring( 0, 10 ) : '';
-
-					return {
-						index       : idx,
-						fileId      : item.id      || '',
-						src         : item.src     || '',
-						downloadUrl : item.downloadUrl || '',
-						title       : title,
-						description : item.desc    || '',
-						author      : author,
-						date        : date,
-						location    : item.regione || '',
-						lat         : item.lat     || null,
-						lon         : item.lon     || null,
-						tags        : Array.isArray( item.tags ) ? item.tags : [],
-						uploadedBy  : item.uploadedBy || '',
-					};
-				} ).filter( function ( p ) { return p.fileId; } );
-
-				state.filtered = state.photos.slice();
-				renderGrid();
+			success : function ( meta ) {
+				var mime = meta.mimeType || '';
+				if ( mime === 'application/vnd.google-apps.spreadsheet' ) {
+					loadFromSheet();
+				} else if ( mime === 'application/vnd.google-apps.folder' ) {
+					loadFromFolder();
+				} else {
+					// Raw binary file (JSON, etc.) – download directly
+					fetchRawJSON( SHEET_ID );
+				}
 			},
 			error : function ( xhr ) {
-				var msg = 'Errore durante il caricamento del JSON metadati.';
-				try {
-					var err = JSON.parse( xhr.responseText );
-					if ( err.error && err.error.message ) msg += ' ' + err.error.message;
-				} catch ( e ) {}
+				showError( 'Impossibile leggere i metadati del file Drive. Verifica i permessi.' );
+			},
+		} );
+	}
+
+	// Case A: file is a raw JSON binary on Drive
+	function fetchRawJSON( fileId ) {
+		$.ajax( {
+			url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( fileId ) + '?alt=media',
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function ( data ) {
+				var items = Array.isArray( data ) ? data : ( data.photos || [] );
+				parseAndRender( items );
+			},
+			error : function ( xhr ) {
+				var msg = 'Errore nel download del JSON.';
+				try { msg += ' ' + JSON.parse( xhr.responseText ).error.message; } catch(e){}
 				showError( msg );
 			},
 		} );
+	}
+
+	// Case B: file is a Google Sheet – use Sheets API to read first sheet
+	function loadFromSheet() {
+		var url = 'https://sheets.googleapis.com/v4/spreadsheets/' +
+			encodeURIComponent( SHEET_ID ) + '/values/A2:K?majorDimension=ROWS';
+		$.ajax( {
+			url     : url,
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function ( data ) {
+				var rows = ( data && data.values ) ? data.values : [];
+				// Expected columns: A=id B=src C=downloadUrl D=lat E=lon F=regione G=desc H=tags I=uploadedBy J=uploadedAt K=author
+				var items = rows.map( function( r ) {
+					return {
+						id          : r[0] || '',
+						src         : r[1] || '',
+						downloadUrl : r[2] || '',
+						lat         : parseFloat( r[3] ) || null,
+						lon         : parseFloat( r[4] ) || null,
+						regione     : r[5] || '',
+						desc        : r[6] || '',
+						tags        : r[7] ? r[7].split( ',' ).map( function(t){ return t.trim(); } ) : [],
+						uploadedBy  : r[8] || '',
+						uploadedAt  : r[9] || '',
+						author      : r[10] || '',
+					};
+				} );
+				parseAndRender( items );
+			},
+			error : function() { showError( 'Errore lettura Google Sheet.' ); },
+		} );
+	}
+
+	// Case C: file is a Drive folder – load all JSON files inside it
+	function loadFromFolder() {
+		var url = 'https://www.googleapis.com/drive/v3/files' +
+			'?q=' + encodeURIComponent( '"' + SHEET_ID + '" in parents and mimeType="application/json" and trashed=false' ) +
+			'&fields=files(id,name)&pageSize=50';
+		$.ajax( {
+			url     : url,
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+			success : function( data ) {
+				var files = ( data && data.files ) ? data.files : [];
+				if ( ! files.length ) { showError( 'Nessun file JSON trovato nella cartella.' ); return; }
+				var allItems = [];
+				var done = 0;
+				files.forEach( function( f ) {
+					$.ajax( {
+						url     : 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( f.id ) + '?alt=media',
+						headers : { Authorization: 'Bearer ' + state.accessToken },
+						success : function( d ) {
+							var arr = Array.isArray( d ) ? d : ( d.photos || [] );
+							allItems = allItems.concat( arr );
+						},
+						complete : function() {
+							done++;
+							if ( done === files.length ) parseAndRender( allItems );
+						},
+					} );
+				} );
+			},
+			error : function() { showError( 'Errore lettura cartella Drive.' ); },
+		} );
+	}
+
+	// Shared parser: convert raw items array → state.photos and render
+	function parseAndRender( items ) {
+		state.photos = items.map( function ( item, idx ) {
+			var title = ( item.desc && item.desc.trim() )
+				? item.desc.trim()
+				: ( item.regione || '' ) + ( item.tags && item.tags.length ? ' – ' + item.tags[ 0 ] : '' );
+			if ( ! title ) title = 'Foto CAI #' + ( idx + 1 );
+
+			var author = item.author || ( item.uploadedBy ? item.uploadedBy.split( '@' )[ 0 ].replace( /\./g, ' ' ) : '' );
+			var date   = item.uploadedAt ? item.uploadedAt.substring( 0, 10 ) : '';
+
+			return {
+				index       : idx,
+				fileId      : item.id      || '',
+				src         : item.src     || '',
+				downloadUrl : item.downloadUrl || '',
+				title       : title,
+				description : item.desc    || '',
+				author      : author,
+				date        : date,
+				location    : item.regione || '',
+				lat         : item.lat     || null,
+				lon         : item.lon     || null,
+				tags        : Array.isArray( item.tags ) ? item.tags : [],
+				uploadedBy  : item.uploadedBy || '',
+			};
+		} ).filter( function ( p ) { return p.fileId; } );
+
+		if ( ! state.photos.length ) {
+			showError( 'Archivio vuoto o formato non riconosciuto.' );
+			return;
+		}
+		state.filtered = state.photos.slice();
+		renderGrid();
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -204,10 +292,12 @@
 			'<span class="fcai-user">👤 ' + escHtml( email ) + '</span>' +
 			'<button id="fcai-signout-btn" class="button">Esci</button>' +
 			'<input id="fcai-search" type="search" placeholder="Cerca per titolo, autore, luogo…" class="fcai-search" />' +
+			'<button id="fcai-view-toggle" class="button fcai-view-toggle" title="Passa alla mappa">🗺️ Mappa</button>' +
 			'</div>'
 		);
 		$panel.html( '' ).append( $bar );
 		$panel.append( '<div id="fcai-grid-container"></div>' );
+		$panel.append( '<div id="fcai-map-container" style="display:none;"></div>' );
 		$panel.append( '<div id="fcai-pager" class="fcai-pager"></div>' );
 		$panel.append( '<div id="fcai-detail" class="fcai-detail" style="display:none;"></div>' );
 
@@ -216,6 +306,7 @@
 			state.userEmail   = null;
 			state.photos      = [];
 			state.selected    = null;
+			mapDestroy();
 			renderLoginScreen();
 		} );
 
@@ -223,8 +314,20 @@
 			state.searchQuery = $( this ).val().toLowerCase();
 			state.page = 1;
 			applyFilter();
-			renderGrid();
+			if ( state.viewMode === 'map' ) {
+				renderMap();
+			} else {
+				renderGrid();
+			}
 		}, 300 ) );
+
+		$panel.find( '#fcai-view-toggle' ).on( 'click', function () {
+			if ( state.viewMode === 'grid' ) {
+				switchToMap();
+			} else {
+				switchToGrid();
+			}
+		} );
 	}
 
 	function renderLoading( msg ) {
@@ -274,17 +377,20 @@
 
 		var html = '<div class="fcai-grid">';
 		subset.forEach( function ( photo ) {
-			// Prefer the src URL from JSON (already a Drive direct link); fall back to thumbnail API
-		var thumbUrl = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w200' );
 			var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
 			html +=
 				'<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
-				'  <img src="' + escAttr( thumbUrl ) + '" alt="' + escAttr( photo.title ) + '" loading="lazy" />' +
+				'  <img data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" class="fcai-thumb-img fcai-thumb-loading" />' +
 				'  <span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
 				'</div>';
 		} );
 		html += '</div>';
 		$container.html( html );
+
+		// Load thumbnails via authenticated fetch (img tags can't send Authorization headers)
+		$container.find( 'img.fcai-thumb-img' ).each( function () {
+			loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
+		} );
 
 		// Click on thumbnail → show detail panel
 		$container.find( '.fcai-thumb' ).on( 'click', function () {
@@ -298,6 +404,59 @@
 		} );
 
 		renderPager();
+	}
+
+	// Cache of already-fetched blob URLs (fileId → objectURL) to avoid re-fetching on re-render
+	var thumbCache = {};
+
+	function loadThumbAuthenticated( imgEl, fileId ) {
+		if ( ! fileId ) return;
+
+		// Serve from cache immediately if available
+		if ( thumbCache[ fileId ] ) {
+			imgEl.src = thumbCache[ fileId ];
+			imgEl.classList.remove( 'fcai-thumb-loading' );
+			return;
+		}
+
+		// Drive thumbnail URL – requires Authorization header for private files
+		var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( fileId ) + '?alt=media&mimeType=image/jpeg';
+		// Use the smaller thumbnail via the thumbnail service (faster, lower bandwidth)
+		var thumbUrl = 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( fileId ) + '&sz=w300';
+
+		window.fetch( thumbUrl, {
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+		} )
+		.then( function ( r ) {
+			if ( ! r.ok ) throw new Error( r.status );
+			return r.blob();
+		} )
+		.then( function ( blob ) {
+			var objectUrl = URL.createObjectURL( blob );
+			thumbCache[ fileId ] = objectUrl;
+			imgEl.src = objectUrl;
+			imgEl.classList.remove( 'fcai-thumb-loading' );
+		} )
+		.catch( function () {
+			// Fall back to full file download if thumbnail service fails
+			window.fetch( url, {
+				headers : { Authorization: 'Bearer ' + state.accessToken },
+			} )
+			.then( function ( r ) {
+				if ( ! r.ok ) throw new Error( r.status );
+				return r.blob();
+			} )
+			.then( function ( blob ) {
+				var objectUrl = URL.createObjectURL( blob );
+				thumbCache[ fileId ] = objectUrl;
+				imgEl.src = objectUrl;
+				imgEl.classList.remove( 'fcai-thumb-loading' );
+			} )
+			.catch( function () {
+				imgEl.classList.remove( 'fcai-thumb-loading' );
+				imgEl.classList.add( 'fcai-thumb-error' );
+			} );
+		} );
 	}
 
 	function renderPager() {
@@ -331,13 +490,12 @@
 
 		var credits = buildCredits( photo );
 
-		var previewSrc = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w400' );
 		var coordsText = ( photo.lat && photo.lon ) ? photo.lat.toFixed( 5 ) + ', ' + photo.lon.toFixed( 5 ) : '';
 
 		$detail.show().html(
 			'<div class="fcai-detail-inner">' +
 			'  <div class="fcai-detail-thumb">' +
-			'    <img src="' + escAttr( previewSrc ) + '" alt="' + escAttr( photo.title ) + '" />' +
+			'    <img id="fcai-detail-img" class="fcai-thumb-loading" alt="' + escAttr( photo.title ) + '" />' +
 			'  </div>' +
 			'  <div class="fcai-detail-meta">' +
 			'    <h3>' + escHtml( photo.title ) + '</h3>' +
@@ -360,9 +518,119 @@
 			'</div>'
 		);
 
+		// Load preview image authenticated (larger thumbnail for detail panel)
+		var detailImg = document.getElementById( 'fcai-detail-img' );
+		if ( detailImg ) {
+			// Use cached thumb if already loaded; otherwise fetch a larger version
+			if ( thumbCache[ photo.fileId ] ) {
+				detailImg.src = thumbCache[ photo.fileId ];
+				detailImg.classList.remove( 'fcai-thumb-loading' );
+			} else {
+				loadThumbAuthenticated( detailImg, photo.fileId );
+			}
+		}
+
 		$detail.find( '#fcai-import-btn' ).on( 'click', function () {
 			if ( state.importing ) return;
 			importPhoto( photo );
+		} );
+	}
+
+	/**
+	 * After import, insert the new attachment into the current editing context:
+	 * - Featured image panel  → sets it as featured image
+	 * - Gutenberg block       → inserts image block via block editor store
+	 * - Classic editor        → inserts via wp.media.editor.insert()
+	 * - Generic media frame   → selects the attachment and closes the modal
+	 *
+	 * Calls callback( true ) if successfully inserted into the post,
+	 * callback( false ) if only added to media library.
+	 */
+	function insertAttachmentIntoContext( attachmentId, callback ) {
+		var attachment = wp.media.attachment( attachmentId );
+
+		attachment.fetch( {
+			success: function () {
+				var frame   = wp.media.frame;
+				var handled = false;
+
+				// ── 1. Featured image context ────────────────────────────────
+				if ( frame && frame.options && frame.options.state === 'featured-image' ) {
+					var postId = wp.media.view.settings.post && wp.media.view.settings.post.id;
+					if ( postId ) {
+						wp.media.featuredImage.set( attachmentId );
+						// Update the featured image thumbnail in the sidebar
+						$( '#set-post-thumbnail' ).find( 'img' ).replaceWith(
+							$( '<img>', { src: attachment.get( 'url' ), style: 'max-width:100%' } )
+						);
+						handled = true;
+					}
+				}
+
+				// ── 2. Gutenberg block editor ────────────────────────────────
+				if ( ! handled && window.wp && wp.data && wp.data.select( 'core/editor' ) ) {
+					try {
+						var selectedBlock = wp.data.select( 'core/block-editor' ).getSelectedBlock();
+						// If a specific image block is selected and empty, replace it
+						if ( selectedBlock && selectedBlock.name === 'core/image' && ! selectedBlock.attributes.id ) {
+							wp.data.dispatch( 'core/block-editor' ).updateBlockAttributes(
+								selectedBlock.clientId,
+								{ id: attachmentId, url: attachment.get( 'url' ), alt: attachment.get( 'alt' ) }
+							);
+						} else {
+							// Insert a new image block at the current cursor position
+							var block = wp.blocks.createBlock( 'core/image', {
+								id  : attachmentId,
+								url : attachment.get( 'url' ),
+								alt : attachment.get( 'alt' ) || attachment.get( 'title' ),
+								caption : attachment.get( 'caption' ) || '',
+							} );
+							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+						}
+						handled = true;
+					} catch ( e ) {
+						// Gutenberg not available or error – fall through
+					}
+				}
+
+				// ── 3. Classic editor (TinyMCE / wp.media.editor) ────────────
+				if ( ! handled && window.wp && wp.media.editor && wp.media.editor.insert ) {
+					try {
+						var imgHtml = wp.media.string.image( {
+							model : attachment,
+							size  : 'large',
+						} );
+						wp.media.editor.insert( imgHtml );
+						handled = true;
+					} catch ( e ) {
+						// Classic editor not available – fall through
+					}
+				}
+
+				// ── 4. Generic frame: select attachment and close ────────────
+				if ( ! handled && frame && frame.state ) {
+					try {
+						var selection = frame.state().get( 'selection' );
+						if ( selection ) {
+							selection.reset( [ attachment ] );
+							if ( frame.state().get( 'library' ) ) {
+								frame.setState( 'insert' );
+							}
+							handled = true;
+						}
+					} catch ( e ) {}
+				}
+
+				// Close the modal after a short delay so the user sees the status message
+				setTimeout( function () {
+					if ( frame ) { try { frame.close(); } catch(e){} }
+				}, 800 );
+
+				callback( handled );
+			},
+			error: function () {
+				callback( false );
+			},
 		} );
 	}
 
@@ -401,6 +669,7 @@
 			contentType : 'application/json',
 			data        : JSON.stringify( {
 				drive_file_id : photo.fileId,
+				download_url  : photo.downloadUrl || '',
 				access_token  : state.accessToken,
 				title         : photo.title,
 				caption       : credits,
@@ -413,20 +682,11 @@
 			success : function ( resp ) {
 				state.importing = false;
 				$btn.prop( 'disabled', false ).text( '⬇ Importa nella libreria media' );
-				$status.text( '✅ Importata! (ID: ' + resp.id + ')' );
+				$status.text( '✅ Importata! Inserimento in corso…' );
 
-				// Notify WP media modal of the new attachment so it can be
-				// selected immediately (works when the modal is open in "select" mode)
-				if ( wp.media.frame && wp.media.frame.state ) {
-					var selection = wp.media.frame.state().get( 'selection' );
-					if ( selection ) {
-						var attachment = wp.media.attachment( resp.id );
-						attachment.fetch( { success : function () {
-							selection.reset( [ attachment ] );
-							wp.media.frame.close();
-						} } );
-					}
-				}
+				insertAttachmentIntoContext( resp.id, function ( inserted ) {
+					$status.text( inserted ? '✅ Inserita nell\'articolo!' : '✅ Importata nella libreria media (ID: ' + resp.id + ')' );
+				} );
 			},
 			error : function ( xhr ) {
 				state.importing = false;
@@ -436,6 +696,162 @@
 				$status.text( '❌ ' + msg );
 			},
 		} );
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Map view (Leaflet + OpenStreetMap)                                   */
+	/* ------------------------------------------------------------------ */
+
+	var leafletMap     = null;
+	var markerCluster  = null;
+	var leafletLoaded  = false;
+
+	function loadLeaflet( callback ) {
+		if ( leafletLoaded ) { callback(); return; }
+
+		// Leaflet CSS
+		var cssLink  = document.createElement( 'link' );
+		cssLink.rel  = 'stylesheet';
+		cssLink.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+		document.head.appendChild( cssLink );
+
+		// MarkerCluster CSS
+		var cssCluster  = document.createElement( 'link' );
+		cssCluster.rel  = 'stylesheet';
+		cssCluster.href = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css';
+		document.head.appendChild( cssCluster );
+
+		// Leaflet JS
+		var script   = document.createElement( 'script' );
+		script.src   = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+		script.onload = function () {
+			// MarkerCluster JS
+			var scriptCluster   = document.createElement( 'script' );
+			scriptCluster.src   = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js';
+			scriptCluster.onload = function () {
+				leafletLoaded = true;
+				callback();
+			};
+			document.head.appendChild( scriptCluster );
+		};
+		document.head.appendChild( script );
+	}
+
+	function switchToMap() {
+		state.viewMode = 'map';
+		$( '#fcai-view-toggle' ).text( '☰ Griglia' ).attr( 'title', 'Passa alla griglia' );
+		$( '#fcai-grid-container' ).hide();
+		$( '#fcai-pager' ).hide();
+		$( '#fcai-map-container' ).show();
+		loadLeaflet( renderMap );
+	}
+
+	function switchToGrid() {
+		state.viewMode = 'grid';
+		$( '#fcai-view-toggle' ).text( '🗺️ Mappa' ).attr( 'title', 'Passa alla mappa' );
+		$( '#fcai-map-container' ).hide();
+		$( '#fcai-grid-container' ).show();
+		$( '#fcai-pager' ).show();
+		renderGrid();
+	}
+
+	function mapDestroy() {
+		if ( leafletMap ) {
+			leafletMap.remove();
+			leafletMap    = null;
+			markerCluster = null;
+		}
+	}
+
+	function renderMap() {
+		var $container = $( '#fcai-map-container' );
+		if ( ! $container.length || ! window.L ) return;
+
+		var photos = state.filtered.filter( function ( p ) {
+			return p.lat && p.lon;
+		} );
+
+		// Init map once
+		if ( ! leafletMap ) {
+			$container.html( '<div id="fcai-leaflet" class="fcai-leaflet"></div>' );
+
+			leafletMap = L.map( 'fcai-leaflet', { zoomControl: true } );
+
+			L.tileLayer( 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+				attribution : '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+				maxZoom     : 18,
+			} ).addTo( leafletMap );
+
+			markerCluster = L.markerClusterGroup( {
+				showCoverageOnHover : false,
+				maxClusterRadius    : 50,
+			} );
+			leafletMap.addLayer( markerCluster );
+		} else {
+			markerCluster.clearLayers();
+		}
+
+		if ( ! photos.length ) {
+			$container.html( '<div class="fcai-empty">Nessuna foto con coordinate GPS trovata.</div>' );
+			return;
+		}
+
+		// Build custom camera-icon marker
+		var cameraIcon = L.divIcon( {
+			className : 'fcai-map-marker',
+			html      : '<div class="fcai-marker-pin">📷</div>',
+			iconSize  : [ 36, 36 ],
+			iconAnchor: [ 18, 36 ],
+			popupAnchor: [ 0, -36 ],
+		} );
+
+		photos.forEach( function ( photo ) {
+			var marker = L.marker( [ photo.lat, photo.lon ], { icon: cameraIcon } );
+
+			// Popup with thumbnail (loaded authenticated) and basic info
+			var popupId   = 'fcai-popup-img-' + photo.index;
+			var popupHtml =
+				'<div class="fcai-popup">' +
+				'  <img id="' + popupId + '" class="fcai-popup-thumb fcai-thumb-loading" alt="' + escAttr( photo.title ) + '" />' +
+				'  <div class="fcai-popup-title">' + escHtml( photo.title ) + '</div>' +
+				'  <div class="fcai-popup-sub">' + escHtml( photo.location ) + ( photo.date ? ' · ' + escHtml( photo.date ) : '' ) + '</div>' +
+				'  <button class="button button-primary fcai-popup-select">Seleziona foto</button>' +
+				'</div>';
+
+			marker.bindPopup( popupHtml, { minWidth: 200 } );
+
+			marker.on( 'popupopen', function () {
+				// Load thumbnail authenticated when popup opens
+				var imgEl = document.getElementById( popupId );
+				if ( imgEl ) loadThumbAuthenticated( imgEl, photo.fileId );
+
+				// Wire up the "Seleziona" button
+				setTimeout( function () {
+					var btn = document.querySelector( '.fcai-popup-select' );
+					if ( btn ) {
+						btn.addEventListener( 'click', function () {
+							marker.closePopup();
+							state.selected = photo;
+							renderDetail( photo );
+							// Scroll detail panel into view
+							var $detail = $( '#fcai-detail' );
+							if ( $detail.length ) {
+								$detail[ 0 ].scrollIntoView( { behavior: 'smooth', block: 'start' } );
+							}
+						} );
+					}
+				}, 50 );
+			} );
+
+			markerCluster.addLayer( marker );
+		} );
+
+		// Fit map to show all markers
+		var bounds = L.latLngBounds( photos.map( function ( p ) { return [ p.lat, p.lon ]; } ) );
+		leafletMap.fitBounds( bounds, { padding: [ 30, 30 ] } );
+
+		// Invalidate size in case the modal resized after init
+		setTimeout( function () { if ( leafletMap ) leafletMap.invalidateSize(); }, 200 );
 	}
 
 	/* ------------------------------------------------------------------ */

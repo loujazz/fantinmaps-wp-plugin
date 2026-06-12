@@ -83,6 +83,10 @@ function fcai_register_rest_routes() {
 				'required'          => true,
 				'sanitize_callback' => 'sanitize_text_field',
 			],
+			'download_url' => [
+				'required'          => false,
+				'sanitize_callback' => 'esc_url_raw',
+			],
 			'access_token' => [
 				'required'          => true,
 				'sanitize_callback' => 'sanitize_text_field',
