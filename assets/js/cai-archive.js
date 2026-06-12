@@ -648,28 +648,65 @@
 				}
 
 				// ── Classic editor (TinyMCE) ─────────────────────────────────
-				if ( window.wp && wp.media && wp.media.editor && wp.media.editor.insert ) {
-					try {
-						var imgHtml = wp.media.string.image(
-							wp.media.string.props( { size: 'large' }, attachment )
-						);
-						wp.media.editor.insert( imgHtml );
-						$status.html( '✅ Inserita nell\'articolo!' );
-						if ( frame ) { try { frame.close(); } catch ( e ) {} }
-						return;
-					} catch ( e ) {
-						console.error( '[Archivio CAI] insert classico fallito', e );
-					}
+				// Build the <img> HTML, preferring the "large" size for a good
+				// balance of quality and page weight.
+				var sizes   = attachment.get( 'sizes' ) || {};
+				var bestUrl = ( sizes.large && sizes.large.url )
+					? sizes.large.url
+					: ( sizes.full && sizes.full.url ) || attachment.get( 'url' );
+				var altTxt  = attachment.get( 'alt' ) || attachment.get( 'title' ) || '';
+				var capTxt  = attachment.get( 'caption' ) || '';
+				var sizeW   = ( sizes.large && sizes.large.width ) ? sizes.large.width : ( attachment.get( 'width' ) || '' );
+
+				var imgTag = '<img src="' + bestUrl + '" alt="' + escAttr( altTxt ) +
+					'" class="alignnone size-large wp-image-' + attachmentId + '"' +
+					( sizeW ? ' width="' + sizeW + '"' : '' ) + ' />';
+
+				var html = imgTag;
+				if ( capTxt ) {
+					html = '[caption id="attachment_' + attachmentId + '" align="alignnone"' +
+						( sizeW ? ' width="' + sizeW + '"' : '' ) + ']' +
+						imgTag + ' ' + capTxt + '[/caption]';
 				}
 
-				// ── Fallback: select in the frame so user clicks Insert ──────
-				if ( frame && frame.state ) {
-					try {
-						var selection = frame.state().get( 'selection' );
-						if ( selection ) selection.reset( [ attachment ] );
-					} catch ( e ) {}
-				}
-				$status.html( '✅ Importata. Clicca "Inserisci" per aggiungerla.' );
+				// Close our modal first so focus returns to the editor
+				if ( frame ) { try { frame.close(); } catch ( e ) {} }
+
+				setTimeout( function () {
+					var inserted = false;
+
+					// 1. Visual tab: insert into the active TinyMCE editor
+					if ( window.tinymce ) {
+						var ed = tinymce.get( 'content' ) || tinymce.activeEditor;
+						if ( ed && ! ed.isHidden() ) {
+							ed.execCommand( 'mceInsertContent', false, html );
+							inserted = true;
+						}
+					}
+
+					// 2. Text tab: insert into the textarea via WP helper
+					if ( ! inserted && window.wp && wp.media && wp.media.editor && wp.media.editor.insert ) {
+						try {
+							wp.media.editor.insert( html );
+							inserted = true;
+						} catch ( e ) {}
+					}
+
+					// 3. Last resort: raw textarea injection
+					if ( ! inserted ) {
+						var ta = document.getElementById( 'content' );
+						if ( ta ) {
+							ta.value += '\n' + html + '\n';
+							inserted = true;
+						}
+					}
+
+					$status.html( inserted
+						? '✅ Inserita nell\'articolo!'
+						: '<span class="fcai-err">⚠️ Importata nei Media. Inseriscila manualmente.</span>'
+					);
+				}, 200 );
+				return;
 			},
 			error : function () {
 				$status.html( '<span class="fcai-err">❌ Import OK ma inserimento fallito. Cerca l\'immagine nei Media.</span>' );
