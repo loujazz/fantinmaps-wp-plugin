@@ -555,6 +555,7 @@
 			contentType : 'application/json',
 			data        : JSON.stringify( {
 				drive_file_id : photo.fileId,
+				download_url  : photo.downloadUrl || '',
 				access_token  : state.accessToken,
 				title         : photo.title,
 				caption       : credits,

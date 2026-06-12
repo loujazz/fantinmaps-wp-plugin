@@ -15,6 +15,7 @@ class FCAI_Ajax_Handler {
 	 *
 	 * Expected body (JSON):
 	 *   drive_file_id  – Google Drive file ID of the photo
+	 *   download_url   – direct download URL from JSON (optional, preferred)
 	 *   access_token   – user's OAuth access token (validated on client)
 	 *   title          – photo title
 	 *   caption        – credits / caption string
@@ -25,6 +26,7 @@ class FCAI_Ajax_Handler {
 	 */
 	public static function rest_import_photo( WP_REST_Request $request ) {
 		$drive_file_id = $request->get_param( 'drive_file_id' );
+		$download_url  = $request->get_param( 'download_url' ) ?: '';
 		$access_token  = $request->get_param( 'access_token' );
 		$title         = $request->get_param( 'title' ) ?: 'Foto FantinMaps';
 		$caption       = $request->get_param( 'caption' ) ?: '';
@@ -70,11 +72,18 @@ class FCAI_Ajax_Handler {
 			$filename = sanitize_file_name( $meta['name'] );
 		}
 
+		// Determine the best download URL:
+		// 1. Use downloadUrl from JSON if provided (original full-resolution file)
+		// 2. Fall back to Drive API ?alt=media
+		$fetch_url = ! empty( $download_url )
+			? $download_url
+			: 'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?alt=media';
+
 		// Download the file content from Drive
 		$tmp_file = wp_tempnam( $filename );
 
 		$download_response = wp_remote_get(
-			'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?alt=media',
+			$fetch_url,
 			[
 				'headers' => [
 					'Authorization' => 'Bearer ' . $access_token,
