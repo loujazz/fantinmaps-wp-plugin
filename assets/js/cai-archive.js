@@ -620,98 +620,97 @@
 		attachment.fetch( {
 			success : function () {
 				var frame = wp.media.frame;
+				var done  = false;
 
-				// Decide which editor we're in
-				var isGutenberg = !! document.querySelector( '.block-editor-writing-flow, .edit-post-visual-editor, .editor-styles-wrapper' )
-					&& window.wp && wp.data && wp.data.select( 'core/block-editor' );
+				// Which editor opened this modal? (set when "Aggiungi media" clicked)
+				var targetEditorId = window.wpActiveEditor || 'content';
+
+				// Is there a live classic TinyMCE editor for this target?
+				var tinyEd = ( window.tinymce && tinymce.get( targetEditorId ) ) || null;
+				var isClassic = !! tinyEd || !! document.getElementById( targetEditorId );
+
+				// ── Classic editor (TinyMCE / textarea) ──────────────────────
+				if ( isClassic ) {
+					var html = buildImgHtml( attachment, attachmentId );
+
+					// A. Visual tab → insert into TinyMCE at cursor
+					if ( tinyEd && ! tinyEd.isHidden() ) {
+						tinyEd.focus();
+						tinyEd.execCommand( 'mceInsertContent', false, html );
+						done = true;
+					}
+
+					// B. WP native global (handles visual/text + bookmark)
+					if ( ! done && typeof window.send_to_editor === 'function' ) {
+						window.send_to_editor( html );
+						done = true;
+					}
+
+					// C. Text tab → inject into the textarea
+					if ( ! done ) {
+						var ta = document.getElementById( targetEditorId );
+						if ( ta && typeof ta.value !== 'undefined' ) {
+							var pos = ta.selectionStart || ta.value.length;
+							ta.value = ta.value.slice( 0, pos ) + '\n' + html + '\n' + ta.value.slice( pos );
+							done = true;
+						}
+					}
+				}
 
 				// ── Gutenberg block editor ───────────────────────────────────
-				if ( isGutenberg ) {
-					if ( frame ) { try { frame.close(); } catch ( e ) {} }
-					// Wait for the modal to fully close so editor regains focus
-					setTimeout( function () {
-						try {
-							var block = wp.blocks.createBlock( 'core/image', {
-								id      : attachmentId,
-								url     : attachment.get( 'url' ),
-								alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
-								caption : attachment.get( 'caption' ) || '',
-								sizeSlug: 'large',
-							} );
-							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
-						} catch ( e ) {
-							console.error( '[Archivio CAI] insertBlocks fallito', e );
-						}
-					}, 350 );
-					$status.html( '✅ Inserita nell\'articolo!' );
-					return;
+				if ( ! done && window.wp && wp.blocks && wp.data && wp.data.dispatch( 'core/block-editor' ) ) {
+					try {
+						var block = wp.blocks.createBlock( 'core/image', {
+							id      : attachmentId,
+							url     : attachment.get( 'url' ),
+							alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
+							caption : attachment.get( 'caption' ) || '',
+							sizeSlug: 'large',
+						} );
+						wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
+						done = true;
+					} catch ( e ) {
+						console.error( '[Archivio CAI] insertBlocks fallito', e );
+					}
 				}
 
-				// ── Classic editor (TinyMCE) ─────────────────────────────────
-				// Build the <img> HTML, preferring the "large" size for a good
-				// balance of quality and page weight.
-				var sizes   = attachment.get( 'sizes' ) || {};
-				var bestUrl = ( sizes.large && sizes.large.url )
-					? sizes.large.url
-					: ( sizes.full && sizes.full.url ) || attachment.get( 'url' );
-				var altTxt  = attachment.get( 'alt' ) || attachment.get( 'title' ) || '';
-				var capTxt  = attachment.get( 'caption' ) || '';
-				var sizeW   = ( sizes.large && sizes.large.width ) ? sizes.large.width : ( attachment.get( 'width' ) || '' );
+				$status.html( done
+					? '✅ Inserita nell\'articolo!'
+					: '<span class="fcai-err">⚠️ Importata nei Media. Inseriscila manualmente.</span>'
+				);
 
-				var imgTag = '<img src="' + bestUrl + '" alt="' + escAttr( altTxt ) +
-					'" class="alignnone size-large wp-image-' + attachmentId + '"' +
-					( sizeW ? ' width="' + sizeW + '"' : '' ) + ' />';
-
-				var html = imgTag;
-				if ( capTxt ) {
-					html = '[caption id="attachment_' + attachmentId + '" align="alignnone"' +
-						( sizeW ? ' width="' + sizeW + '"' : '' ) + ']' +
-						imgTag + ' ' + capTxt + '[/caption]';
-				}
-
-				// Close our modal first so focus returns to the editor
-				if ( frame ) { try { frame.close(); } catch ( e ) {} }
-
+				// Close the modal AFTER inserting, so wpActiveEditor / TinyMCE
+				// are still intact at insertion time.
 				setTimeout( function () {
-					var inserted = false;
-
-					// 1. Visual tab: insert into the active TinyMCE editor
-					if ( window.tinymce ) {
-						var ed = tinymce.get( 'content' ) || tinymce.activeEditor;
-						if ( ed && ! ed.isHidden() ) {
-							ed.execCommand( 'mceInsertContent', false, html );
-							inserted = true;
-						}
-					}
-
-					// 2. Text tab: insert into the textarea via WP helper
-					if ( ! inserted && window.wp && wp.media && wp.media.editor && wp.media.editor.insert ) {
-						try {
-							wp.media.editor.insert( html );
-							inserted = true;
-						} catch ( e ) {}
-					}
-
-					// 3. Last resort: raw textarea injection
-					if ( ! inserted ) {
-						var ta = document.getElementById( 'content' );
-						if ( ta ) {
-							ta.value += '\n' + html + '\n';
-							inserted = true;
-						}
-					}
-
-					$status.html( inserted
-						? '✅ Inserita nell\'articolo!'
-						: '<span class="fcai-err">⚠️ Importata nei Media. Inseriscila manualmente.</span>'
-					);
-				}, 200 );
-				return;
+					if ( frame ) { try { frame.close(); } catch ( e ) {} }
+				}, 500 );
 			},
 			error : function () {
 				$status.html( '<span class="fcai-err">❌ Import OK ma inserimento fallito. Cerca l\'immagine nei Media.</span>' );
 			},
 		} );
+	}
+
+	// Build classic-editor <img> (with optional [caption]) for an attachment.
+	function buildImgHtml( attachment, attachmentId ) {
+		var sizes   = attachment.get( 'sizes' ) || {};
+		var bestUrl = ( sizes.large && sizes.large.url )
+			? sizes.large.url
+			: ( sizes.full && sizes.full.url ) || attachment.get( 'url' );
+		var altTxt  = attachment.get( 'alt' ) || attachment.get( 'title' ) || '';
+		var capTxt  = attachment.get( 'caption' ) || '';
+		var sizeW   = ( sizes.large && sizes.large.width ) ? sizes.large.width : ( attachment.get( 'width' ) || '' );
+
+		var imgTag = '<img src="' + bestUrl + '" alt="' + escAttr( altTxt ) +
+			'" class="alignnone size-large wp-image-' + attachmentId + '"' +
+			( sizeW ? ' width="' + sizeW + '"' : '' ) + ' />';
+
+		if ( capTxt ) {
+			return '[caption id="attachment_' + attachmentId + '" align="alignnone"' +
+				( sizeW ? ' width="' + sizeW + '"' : '' ) + ']' +
+				imgTag + ' ' + capTxt + '[/caption]';
+		}
+		return imgTag;
 	}
 
 	/* ------------------------------------------------------------------ */
