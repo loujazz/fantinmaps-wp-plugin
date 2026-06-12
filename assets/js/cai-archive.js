@@ -361,17 +361,20 @@
 
 		var html = '<div class="fcai-grid">';
 		subset.forEach( function ( photo ) {
-			// Prefer the src URL from JSON (already a Drive direct link); fall back to thumbnail API
-		var thumbUrl = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w200' );
 			var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
 			html +=
 				'<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
-				'  <img src="' + escAttr( thumbUrl ) + '" alt="' + escAttr( photo.title ) + '" loading="lazy" />' +
+				'  <img data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" class="fcai-thumb-img fcai-thumb-loading" />' +
 				'  <span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
 				'</div>';
 		} );
 		html += '</div>';
 		$container.html( html );
+
+		// Load thumbnails via authenticated fetch (img tags can't send Authorization headers)
+		$container.find( 'img.fcai-thumb-img' ).each( function () {
+			loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
+		} );
 
 		// Click on thumbnail → show detail panel
 		$container.find( '.fcai-thumb' ).on( 'click', function () {
@@ -385,6 +388,59 @@
 		} );
 
 		renderPager();
+	}
+
+	// Cache of already-fetched blob URLs (fileId → objectURL) to avoid re-fetching on re-render
+	var thumbCache = {};
+
+	function loadThumbAuthenticated( imgEl, fileId ) {
+		if ( ! fileId ) return;
+
+		// Serve from cache immediately if available
+		if ( thumbCache[ fileId ] ) {
+			imgEl.src = thumbCache[ fileId ];
+			imgEl.classList.remove( 'fcai-thumb-loading' );
+			return;
+		}
+
+		// Drive thumbnail URL – requires Authorization header for private files
+		var url = 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent( fileId ) + '?alt=media&mimeType=image/jpeg';
+		// Use the smaller thumbnail via the thumbnail service (faster, lower bandwidth)
+		var thumbUrl = 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( fileId ) + '&sz=w300';
+
+		window.fetch( thumbUrl, {
+			headers : { Authorization: 'Bearer ' + state.accessToken },
+		} )
+		.then( function ( r ) {
+			if ( ! r.ok ) throw new Error( r.status );
+			return r.blob();
+		} )
+		.then( function ( blob ) {
+			var objectUrl = URL.createObjectURL( blob );
+			thumbCache[ fileId ] = objectUrl;
+			imgEl.src = objectUrl;
+			imgEl.classList.remove( 'fcai-thumb-loading' );
+		} )
+		.catch( function () {
+			// Fall back to full file download if thumbnail service fails
+			window.fetch( url, {
+				headers : { Authorization: 'Bearer ' + state.accessToken },
+			} )
+			.then( function ( r ) {
+				if ( ! r.ok ) throw new Error( r.status );
+				return r.blob();
+			} )
+			.then( function ( blob ) {
+				var objectUrl = URL.createObjectURL( blob );
+				thumbCache[ fileId ] = objectUrl;
+				imgEl.src = objectUrl;
+				imgEl.classList.remove( 'fcai-thumb-loading' );
+			} )
+			.catch( function () {
+				imgEl.classList.remove( 'fcai-thumb-loading' );
+				imgEl.classList.add( 'fcai-thumb-error' );
+			} );
+		} );
 	}
 
 	function renderPager() {
@@ -418,13 +474,12 @@
 
 		var credits = buildCredits( photo );
 
-		var previewSrc = photo.src || ( 'https://drive.google.com/thumbnail?id=' + encodeURIComponent( photo.fileId ) + '&sz=w400' );
 		var coordsText = ( photo.lat && photo.lon ) ? photo.lat.toFixed( 5 ) + ', ' + photo.lon.toFixed( 5 ) : '';
 
 		$detail.show().html(
 			'<div class="fcai-detail-inner">' +
 			'  <div class="fcai-detail-thumb">' +
-			'    <img src="' + escAttr( previewSrc ) + '" alt="' + escAttr( photo.title ) + '" />' +
+			'    <img id="fcai-detail-img" class="fcai-thumb-loading" alt="' + escAttr( photo.title ) + '" />' +
 			'  </div>' +
 			'  <div class="fcai-detail-meta">' +
 			'    <h3>' + escHtml( photo.title ) + '</h3>' +
@@ -446,6 +501,18 @@
 			'  </div>' +
 			'</div>'
 		);
+
+		// Load preview image authenticated (larger thumbnail for detail panel)
+		var detailImg = document.getElementById( 'fcai-detail-img' );
+		if ( detailImg ) {
+			// Use cached thumb if already loaded; otherwise fetch a larger version
+			if ( thumbCache[ photo.fileId ] ) {
+				detailImg.src = thumbCache[ photo.fileId ];
+				detailImg.classList.remove( 'fcai-thumb-loading' );
+			} else {
+				loadThumbAuthenticated( detailImg, photo.fileId );
+			}
+		}
 
 		$detail.find( '#fcai-import-btn' ).on( 'click', function () {
 			if ( state.importing ) return;
