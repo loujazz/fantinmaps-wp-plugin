@@ -39,7 +39,7 @@ class FCAI_Ajax_Handler {
 
 		// Validate access token by fetching Drive file metadata before downloading
 		$meta_response = wp_remote_get(
-			'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?fields=id,name,mimeType,size',
+			'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?fields=id,name,mimeType,size,imageMediaMetadata(width,height)',
 			[
 				'headers' => [
 					'Authorization' => 'Bearer ' . $access_token,
@@ -61,6 +61,9 @@ class FCAI_Ajax_Handler {
 
 		$meta     = json_decode( wp_remote_retrieve_body( $meta_response ), true );
 		$mime     = $meta['mimeType'] ?? 'image/jpeg';
+		$src_w    = $meta['imageMediaMetadata']['width']  ?? 0;
+		$src_h    = $meta['imageMediaMetadata']['height'] ?? 0;
+		$src_size = isset( $meta['size'] ) ? (int) $meta['size'] : 0;
 
 		// Only allow images
 		if ( ! str_starts_with( $mime, 'image/' ) ) {
@@ -134,10 +137,19 @@ class FCAI_Ajax_Handler {
 		] );
 		update_post_meta( $attachment_id, '_wp_attachment_image_alt', $alt_text );
 
+		// Gather imported file info for diagnostics
+		$imp_meta      = wp_get_attachment_metadata( $attachment_id );
+		$imp_path      = get_attached_file( $attachment_id );
+		$imp_filesize  = ( $imp_path && file_exists( $imp_path ) ) ? filesize( $imp_path ) : 0;
+
 		return rest_ensure_response( [
-			'id'    => $attachment_id,
-			'url'   => wp_get_attachment_url( $attachment_id ),
-			'title' => get_the_title( $attachment_id ),
+			'id'                  => $attachment_id,
+			'url'                 => wp_get_attachment_url( $attachment_id ),
+			'title'              => get_the_title( $attachment_id ),
+			'source_dimensions'   => $src_w . 'x' . $src_h,
+			'source_filesize'     => $src_size,
+			'imported_dimensions' => ( $imp_meta['width'] ?? 0 ) . 'x' . ( $imp_meta['height'] ?? 0 ),
+			'imported_filesize'   => $imp_filesize,
 		] );
 	}
 

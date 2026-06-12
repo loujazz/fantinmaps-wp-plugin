@@ -586,7 +586,18 @@
 				state.importing = false;
 				$btn.prop( 'disabled', false ).text( '📥 Inserisci nell\'articolo' );
 				$status.html( '⏳ Inserimento in corso…' );
-				insertIntoPost( resp.id, $status );
+
+				// Log resolution diagnostics to console for debugging
+				if ( resp.source_dimensions ) {
+					var srcKB = Math.round( ( resp.source_filesize || 0 ) / 1024 );
+					var impKB = Math.round( ( resp.imported_filesize || 0 ) / 1024 );
+					console.log(
+						'[Archivio CAI] Sorgente Drive: ' + resp.source_dimensions + ' (' + srcKB + ' KB) → ' +
+						'Importata in WP: ' + resp.imported_dimensions + ' (' + impKB + ' KB)'
+					);
+				}
+
+				insertIntoPost( resp.id, resp, $status );
 			},
 			error : function ( xhr, textStatus ) {
 				state.importing = false;
@@ -604,54 +615,61 @@
 		} );
 	}
 
-	function insertIntoPost( attachmentId, $status ) {
+	function insertIntoPost( attachmentId, resp, $status ) {
 		var attachment = wp.media.attachment( attachmentId );
 		attachment.fetch( {
 			success : function () {
 				var frame = wp.media.frame;
 
-				// ── Gutenberg ────────────────────────────────────────────────
-				// Switch to the standard 'insert' state, set the selection,
-				// then trigger 'select' — this is exactly what WP does when
-				// the user clicks "Insert into post" in the normal library tab.
-				if ( frame && frame.state ) {
-					try {
-						// Try switching to the built-in insert/library state
-						var insertState = frame.states.get( 'insert' ) || frame.states.get( 'library' );
-						if ( insertState ) {
-							var selection = insertState.get( 'selection' );
-							if ( selection ) {
-								selection.reset( [ attachment ] );
-								frame.setState( insertState.id );
-								// Small delay to let the state render, then click Insert
-								setTimeout( function () {
-									frame.$el.find( '.media-button-insert, .media-button-select' ).first().trigger( 'click' );
-								}, 100 );
-								$status.html( '✅ Inserita!' );
-								return;
-							}
-						}
-					} catch ( e ) {}
-				}
+				// Decide which editor we're in
+				var isGutenberg = !! document.querySelector( '.block-editor-writing-flow, .edit-post-visual-editor, .editor-styles-wrapper' )
+					&& window.wp && wp.data && wp.data.select( 'core/block-editor' );
 
-				// ── Fallback: close modal then dispatch Gutenberg block ───────
-				$status.html( '✅ Inserita nell\'articolo!' );
-				if ( frame ) {
-					try { frame.close(); } catch(e) {}
-				}
-				setTimeout( function () {
-					if ( window.wp && wp.blocks && wp.data && wp.data.dispatch( 'core/block-editor' ) ) {
+				// ── Gutenberg block editor ───────────────────────────────────
+				if ( isGutenberg ) {
+					if ( frame ) { try { frame.close(); } catch ( e ) {} }
+					// Wait for the modal to fully close so editor regains focus
+					setTimeout( function () {
 						try {
 							var block = wp.blocks.createBlock( 'core/image', {
 								id      : attachmentId,
 								url     : attachment.get( 'url' ),
 								alt     : attachment.get( 'alt' ) || attachment.get( 'title' ),
 								caption : attachment.get( 'caption' ) || '',
+								sizeSlug: 'large',
 							} );
 							wp.data.dispatch( 'core/block-editor' ).insertBlocks( block );
-						} catch ( e ) {}
+						} catch ( e ) {
+							console.error( '[Archivio CAI] insertBlocks fallito', e );
+						}
+					}, 350 );
+					$status.html( '✅ Inserita nell\'articolo!' );
+					return;
+				}
+
+				// ── Classic editor (TinyMCE) ─────────────────────────────────
+				if ( window.wp && wp.media && wp.media.editor && wp.media.editor.insert ) {
+					try {
+						var imgHtml = wp.media.string.image(
+							wp.media.string.props( { size: 'large' }, attachment )
+						);
+						wp.media.editor.insert( imgHtml );
+						$status.html( '✅ Inserita nell\'articolo!' );
+						if ( frame ) { try { frame.close(); } catch ( e ) {} }
+						return;
+					} catch ( e ) {
+						console.error( '[Archivio CAI] insert classico fallito', e );
 					}
-				}, 300 );
+				}
+
+				// ── Fallback: select in the frame so user clicks Insert ──────
+				if ( frame && frame.state ) {
+					try {
+						var selection = frame.state().get( 'selection' );
+						if ( selection ) selection.reset( [ attachment ] );
+					} catch ( e ) {}
+				}
+				$status.html( '✅ Importata. Clicca "Inserisci" per aggiungerla.' );
 			},
 			error : function () {
 				$status.html( '<span class="fcai-err">❌ Import OK ma inserimento fallito. Cerca l\'immagine nei Media.</span>' );
