@@ -361,6 +361,25 @@
 		} );
 	}
 
+	// Track which groups are expanded { groupKey: true }
+	var expandedGroups = {};
+
+	function buildGroups( photos ) {
+		var groups = {};
+		var order  = [];
+		photos.forEach( function ( photo ) {
+			var keys = state.groupBy === 'tags'
+				? ( photo.tags.length ? photo.tags : [ '(senza tag)' ] )
+				: [ photo.location || '(regione sconosciuta)' ];
+			keys.forEach( function ( k ) {
+				if ( ! groups[ k ] ) { groups[ k ] = []; order.push( k ); }
+				groups[ k ].push( photo );
+			} );
+		} );
+		order.sort();
+		return { groups: groups, order: order };
+	}
+
 	function renderGrid() {
 		var $container = $( '#fcai-grid-container' );
 		if ( ! $container.length ) return;
@@ -371,30 +390,81 @@
 			return;
 		}
 
-		var start  = ( state.page - 1 ) * state.perPage;
-		var end    = start + state.perPage;
-		var subset = state.filtered.slice( start, end );
+		var result = buildGroups( state.filtered );
+		var groups = result.groups;
+		var order  = result.order;
 
-		var html = '<div class="fcai-grid">';
-		subset.forEach( function ( photo ) {
-			var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
-			html +=
-				'<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
-				'  <img data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" class="fcai-thumb-img fcai-thumb-loading" />' +
-				'  <span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
-				'</div>';
+		// Render accordion cards
+		var html = '<div class="fcai-accordion">';
+		order.forEach( function ( key ) {
+			var photos    = groups[ key ];
+			var isOpen    = !! expandedGroups[ key ];
+			var coverIdx  = photos[0].index;
+			var coverId   = photos[0].fileId;
+
+			html += '<div class="fcai-card' + ( isOpen ? ' fcai-card-open' : '' ) + '" data-group-key="' + escAttr( key ) + '">' +
+				// Card header — always visible
+				'<div class="fcai-card-header">' +
+				'  <div class="fcai-card-cover">' +
+				'    <img class="fcai-thumb-img fcai-thumb-loading" data-file-id="' + escAttr( coverId ) + '" alt="" />' +
+				'  </div>' +
+				'  <div class="fcai-card-info">' +
+				'    <strong class="fcai-card-name">' + escHtml( key ) + '</strong>' +
+				'    <span class="fcai-card-count">' + photos.length + ' foto</span>' +
+				'  </div>' +
+				'  <span class="fcai-card-arrow">' + ( isOpen ? '▲' : '▼' ) + '</span>' +
+				'</div>' +
+				// Expandable photo grid
+				'<div class="fcai-card-body"' + ( isOpen ? '' : ' style="display:none;"' ) + '>' +
+				'  <div class="fcai-grid">';
+
+			photos.forEach( function ( photo ) {
+				var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
+				html += '<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
+					'<img class="fcai-thumb-img fcai-thumb-loading" data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" />' +
+					'<span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
+					'</div>';
+			} );
+
+			html += '  </div></div></div>';
 		} );
 		html += '</div>';
+
 		$container.html( html );
 
-		// Load thumbnails via authenticated fetch (img tags can't send Authorization headers)
-		$container.find( 'img.fcai-thumb-img' ).each( function () {
+		// Load cover thumbnails (only card covers initially)
+		$container.find( '.fcai-card-cover img' ).each( function () {
 			loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
 		} );
 
-		// Click on thumbnail → show detail panel
-		$container.find( '.fcai-thumb' ).on( 'click', function () {
-			var idx  = parseInt( $( this ).data( 'index' ), 10 );
+		// Toggle card open/close on header click
+		$container.off( 'click', '.fcai-card-header' ).on( 'click', '.fcai-card-header', function () {
+			var $card = $( this ).closest( '.fcai-card' );
+			var key   = $card.data( 'group-key' );
+			var isOpen = $card.hasClass( 'fcai-card-open' );
+
+			if ( isOpen ) {
+				expandedGroups[ key ] = false;
+				$card.removeClass( 'fcai-card-open' );
+				$card.find( '.fcai-card-body' ).slideUp( 180 );
+				$card.find( '.fcai-card-arrow' ).text( '▼' );
+			} else {
+				expandedGroups[ key ] = true;
+				$card.addClass( 'fcai-card-open' );
+				$card.find( '.fcai-card-body' ).slideDown( 200, function () {
+					// Load thumbnails for newly visible photos
+					$card.find( '.fcai-grid img.fcai-thumb-img' ).each( function () {
+						loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
+					} );
+				} );
+				$card.find( '.fcai-card-arrow' ).text( '▲' );
+			}
+		} );
+
+		// Select photo on thumbnail click
+		$container.off( 'click', '.fcai-thumb' ).on( 'click', '.fcai-thumb', function () {
+			var idx   = parseInt( $( this ).data( 'index' ), 10 );
+>>>>>>> Stashed changes
 			var photo = state.photos[ idx ];
 			if ( ! photo ) return;
 			state.selected = photo;
