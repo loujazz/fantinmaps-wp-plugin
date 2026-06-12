@@ -38,13 +38,14 @@
 	var state = {
 		accessToken : null,
 		userEmail   : null,
-		photos      : [],      // parsed from Sheet
+		photos      : [],      // parsed from Drive
 		filtered    : [],      // after search
 		selected    : null,    // { fileId, title, … }
 		importing   : false,
 		page        : 1,
 		perPage     : 30,
 		searchQuery : '',
+		viewMode    : 'grid',  // 'grid' | 'map'
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -291,10 +292,12 @@
 			'<span class="fcai-user">👤 ' + escHtml( email ) + '</span>' +
 			'<button id="fcai-signout-btn" class="button">Esci</button>' +
 			'<input id="fcai-search" type="search" placeholder="Cerca per titolo, autore, luogo…" class="fcai-search" />' +
+			'<button id="fcai-view-toggle" class="button fcai-view-toggle" title="Passa alla mappa">🗺️ Mappa</button>' +
 			'</div>'
 		);
 		$panel.html( '' ).append( $bar );
 		$panel.append( '<div id="fcai-grid-container"></div>' );
+		$panel.append( '<div id="fcai-map-container" style="display:none;"></div>' );
 		$panel.append( '<div id="fcai-pager" class="fcai-pager"></div>' );
 		$panel.append( '<div id="fcai-detail" class="fcai-detail" style="display:none;"></div>' );
 
@@ -303,6 +306,7 @@
 			state.userEmail   = null;
 			state.photos      = [];
 			state.selected    = null;
+			mapDestroy();
 			renderLoginScreen();
 		} );
 
@@ -310,8 +314,20 @@
 			state.searchQuery = $( this ).val().toLowerCase();
 			state.page = 1;
 			applyFilter();
-			renderGrid();
+			if ( state.viewMode === 'map' ) {
+				renderMap();
+			} else {
+				renderGrid();
+			}
 		}, 300 ) );
+
+		$panel.find( '#fcai-view-toggle' ).on( 'click', function () {
+			if ( state.viewMode === 'grid' ) {
+				switchToMap();
+			} else {
+				switchToGrid();
+			}
+		} );
 	}
 
 	function renderLoading( msg ) {
@@ -680,6 +696,162 @@
 				$status.text( '❌ ' + msg );
 			},
 		} );
+	}
+
+	/* ------------------------------------------------------------------ */
+	/* Map view (Leaflet + OpenStreetMap)                                   */
+	/* ------------------------------------------------------------------ */
+
+	var leafletMap     = null;
+	var markerCluster  = null;
+	var leafletLoaded  = false;
+
+	function loadLeaflet( callback ) {
+		if ( leafletLoaded ) { callback(); return; }
+
+		// Leaflet CSS
+		var cssLink  = document.createElement( 'link' );
+		cssLink.rel  = 'stylesheet';
+		cssLink.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+		document.head.appendChild( cssLink );
+
+		// MarkerCluster CSS
+		var cssCluster  = document.createElement( 'link' );
+		cssCluster.rel  = 'stylesheet';
+		cssCluster.href = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css';
+		document.head.appendChild( cssCluster );
+
+		// Leaflet JS
+		var script   = document.createElement( 'script' );
+		script.src   = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+		script.onload = function () {
+			// MarkerCluster JS
+			var scriptCluster   = document.createElement( 'script' );
+			scriptCluster.src   = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js';
+			scriptCluster.onload = function () {
+				leafletLoaded = true;
+				callback();
+			};
+			document.head.appendChild( scriptCluster );
+		};
+		document.head.appendChild( script );
+	}
+
+	function switchToMap() {
+		state.viewMode = 'map';
+		$( '#fcai-view-toggle' ).text( '☰ Griglia' ).attr( 'title', 'Passa alla griglia' );
+		$( '#fcai-grid-container' ).hide();
+		$( '#fcai-pager' ).hide();
+		$( '#fcai-map-container' ).show();
+		loadLeaflet( renderMap );
+	}
+
+	function switchToGrid() {
+		state.viewMode = 'grid';
+		$( '#fcai-view-toggle' ).text( '🗺️ Mappa' ).attr( 'title', 'Passa alla mappa' );
+		$( '#fcai-map-container' ).hide();
+		$( '#fcai-grid-container' ).show();
+		$( '#fcai-pager' ).show();
+		renderGrid();
+	}
+
+	function mapDestroy() {
+		if ( leafletMap ) {
+			leafletMap.remove();
+			leafletMap    = null;
+			markerCluster = null;
+		}
+	}
+
+	function renderMap() {
+		var $container = $( '#fcai-map-container' );
+		if ( ! $container.length || ! window.L ) return;
+
+		var photos = state.filtered.filter( function ( p ) {
+			return p.lat && p.lon;
+		} );
+
+		// Init map once
+		if ( ! leafletMap ) {
+			$container.html( '<div id="fcai-leaflet" class="fcai-leaflet"></div>' );
+
+			leafletMap = L.map( 'fcai-leaflet', { zoomControl: true } );
+
+			L.tileLayer( 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+				attribution : '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+				maxZoom     : 18,
+			} ).addTo( leafletMap );
+
+			markerCluster = L.markerClusterGroup( {
+				showCoverageOnHover : false,
+				maxClusterRadius    : 50,
+			} );
+			leafletMap.addLayer( markerCluster );
+		} else {
+			markerCluster.clearLayers();
+		}
+
+		if ( ! photos.length ) {
+			$container.html( '<div class="fcai-empty">Nessuna foto con coordinate GPS trovata.</div>' );
+			return;
+		}
+
+		// Build custom camera-icon marker
+		var cameraIcon = L.divIcon( {
+			className : 'fcai-map-marker',
+			html      : '<div class="fcai-marker-pin">📷</div>',
+			iconSize  : [ 36, 36 ],
+			iconAnchor: [ 18, 36 ],
+			popupAnchor: [ 0, -36 ],
+		} );
+
+		photos.forEach( function ( photo ) {
+			var marker = L.marker( [ photo.lat, photo.lon ], { icon: cameraIcon } );
+
+			// Popup with thumbnail (loaded authenticated) and basic info
+			var popupId   = 'fcai-popup-img-' + photo.index;
+			var popupHtml =
+				'<div class="fcai-popup">' +
+				'  <img id="' + popupId + '" class="fcai-popup-thumb fcai-thumb-loading" alt="' + escAttr( photo.title ) + '" />' +
+				'  <div class="fcai-popup-title">' + escHtml( photo.title ) + '</div>' +
+				'  <div class="fcai-popup-sub">' + escHtml( photo.location ) + ( photo.date ? ' · ' + escHtml( photo.date ) : '' ) + '</div>' +
+				'  <button class="button button-primary fcai-popup-select">Seleziona foto</button>' +
+				'</div>';
+
+			marker.bindPopup( popupHtml, { minWidth: 200 } );
+
+			marker.on( 'popupopen', function () {
+				// Load thumbnail authenticated when popup opens
+				var imgEl = document.getElementById( popupId );
+				if ( imgEl ) loadThumbAuthenticated( imgEl, photo.fileId );
+
+				// Wire up the "Seleziona" button
+				setTimeout( function () {
+					var btn = document.querySelector( '.fcai-popup-select' );
+					if ( btn ) {
+						btn.addEventListener( 'click', function () {
+							marker.closePopup();
+							state.selected = photo;
+							renderDetail( photo );
+							// Scroll detail panel into view
+							var $detail = $( '#fcai-detail' );
+							if ( $detail.length ) {
+								$detail[ 0 ].scrollIntoView( { behavior: 'smooth', block: 'start' } );
+							}
+						} );
+					}
+				}, 50 );
+			} );
+
+			markerCluster.addLayer( marker );
+		} );
+
+		// Fit map to show all markers
+		var bounds = L.latLngBounds( photos.map( function ( p ) { return [ p.lat, p.lon ]; } ) );
+		leafletMap.fitBounds( bounds, { padding: [ 30, 30 ] } );
+
+		// Invalidate size in case the modal resized after init
+		setTimeout( function () { if ( leafletMap ) leafletMap.invalidateSize(); }, 200 );
 	}
 
 	/* ------------------------------------------------------------------ */
