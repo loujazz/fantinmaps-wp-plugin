@@ -45,7 +45,8 @@
 		page        : 1,
 		perPage     : 30,
 		searchQuery : '',
-		viewMode    : 'grid',  // 'grid' | 'map'
+		viewMode    : 'map',   // 'map' | 'grid' — map is default
+		groupBy     : 'regione', // 'regione' | 'tags'
 	};
 
 	/* ------------------------------------------------------------------ */
@@ -239,7 +240,8 @@
 			return;
 		}
 		state.filtered = state.photos.slice();
-		renderGrid();
+		// Map is the default view
+		loadLeaflet( renderMap );
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -287,18 +289,23 @@
 	}
 
 	function renderLoggedIn( email ) {
-		// Top bar with user info; grid content will be injected separately
 		var $bar = $( '<div class="fcai-topbar">' +
 			'<span class="fcai-user">👤 ' + escHtml( email ) + '</span>' +
 			'<button id="fcai-signout-btn" class="button">Esci</button>' +
-			'<input id="fcai-search" type="search" placeholder="Cerca per titolo, autore, luogo…" class="fcai-search" />' +
-			'<button id="fcai-view-toggle" class="button fcai-view-toggle" title="Passa alla mappa">🗺️ Mappa</button>' +
+			'<input id="fcai-search" type="search" placeholder="Cerca foto per titolo, autore, tag…" class="fcai-search" />' +
+			'<button id="fcai-view-toggle" class="button fcai-view-toggle">☰ Griglia</button>' +
+			'</div>' +
+			// Group toolbar — only visible in grid mode
+			'<div id="fcai-grid-toolbar" class="fcai-grid-toolbar" style="display:none;">' +
+			'  <span class="fcai-group-label">Raggruppa per:</span>' +
+			'  <button id="fcai-group-regione" class="button fcai-group-btn fcai-group-active">Regione</button>' +
+			'  <button id="fcai-group-tags"    class="button fcai-group-btn">Tag</button>' +
 			'</div>'
 		);
 		$panel.html( '' ).append( $bar );
-		$panel.append( '<div id="fcai-grid-container"></div>' );
-		$panel.append( '<div id="fcai-map-container" style="display:none;"></div>' );
-		$panel.append( '<div id="fcai-pager" class="fcai-pager"></div>' );
+		$panel.append( '<div id="fcai-map-container"></div>' );
+		$panel.append( '<div id="fcai-grid-container" style="display:none;"></div>' );
+		$panel.append( '<div id="fcai-pager" class="fcai-pager" style="display:none;"></div>' );
 		$panel.append( '<div id="fcai-detail" class="fcai-detail" style="display:none;"></div>' );
 
 		// Use event delegation on $panel so handlers survive DOM updates
@@ -323,11 +330,25 @@
 		}, 300 ) );
 
 		$panel.on( 'click', '#fcai-view-toggle', function () {
-			if ( state.viewMode === 'grid' ) {
-				switchToMap();
-			} else {
+			if ( state.viewMode === 'map' ) {
 				switchToGrid();
+			} else {
+				switchToMap();
 			}
+		} );
+
+		$panel.on( 'click', '#fcai-group-regione', function () {
+			state.groupBy = 'regione';
+			$( '#fcai-group-regione' ).addClass( 'fcai-group-active' );
+			$( '#fcai-group-tags' ).removeClass( 'fcai-group-active' );
+			renderGrid();
+		} );
+
+		$panel.on( 'click', '#fcai-group-tags', function () {
+			state.groupBy = 'tags';
+			$( '#fcai-group-tags' ).addClass( 'fcai-group-active' );
+			$( '#fcai-group-regione' ).removeClass( 'fcai-group-active' );
+			renderGrid();
 		} );
 	}
 
@@ -365,37 +386,57 @@
 	function renderGrid() {
 		var $container = $( '#fcai-grid-container' );
 		if ( ! $container.length ) return;
+		$( '#fcai-pager' ).html( '' );
 
 		if ( state.filtered.length === 0 ) {
 			$container.html( '<div class="fcai-empty">Nessuna foto trovata' +
 				( state.searchQuery ? ' per "<strong>' + escHtml( state.searchQuery ) + '</strong>"' : '' ) +
 				'.</div>' );
-			$( '#fcai-pager' ).html( '' );
 			return;
 		}
 
-		var start  = ( state.page - 1 ) * state.perPage;
-		var end    = start + state.perPage;
-		var subset = state.filtered.slice( start, end );
+		// Build groups
+		var groups = {};   // key → [ photo, … ]
+		var order  = [];   // insertion order of keys
 
-		var html = '<div class="fcai-grid">';
-		subset.forEach( function ( photo ) {
-			var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
-			html +=
-				'<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
-				'  <img data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" class="fcai-thumb-img fcai-thumb-loading" />' +
-				'  <span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
-				'</div>';
+		state.filtered.forEach( function ( photo ) {
+			var keys = [];
+			if ( state.groupBy === 'tags' ) {
+				keys = photo.tags.length ? photo.tags : [ '(senza tag)' ];
+			} else {
+				keys = [ photo.location || '(regione sconosciuta)' ];
+			}
+			keys.forEach( function ( k ) {
+				if ( ! groups[ k ] ) { groups[ k ] = []; order.push( k ); }
+				groups[ k ].push( photo );
+			} );
 		} );
-		html += '</div>';
+
+		order.sort();
+
+		var html = '';
+		order.forEach( function ( key ) {
+			var photos = groups[ key ];
+			html += '<div class="fcai-group">' +
+				'<h3 class="fcai-group-header">' + escHtml( key ) +
+				' <span class="fcai-group-count">(' + photos.length + ')</span></h3>' +
+				'<div class="fcai-grid">';
+			photos.forEach( function ( photo ) {
+				var isSelected = state.selected && state.selected.fileId === photo.fileId ? ' fcai-selected' : '';
+				html += '<div class="fcai-thumb' + isSelected + '" data-file-id="' + escAttr( photo.fileId ) + '" data-index="' + photo.index + '">' +
+					'<img data-file-id="' + escAttr( photo.fileId ) + '" alt="' + escAttr( photo.title ) + '" class="fcai-thumb-img fcai-thumb-loading" />' +
+					'<span class="fcai-thumb-title">' + escHtml( photo.title ) + '</span>' +
+					'</div>';
+			} );
+			html += '</div></div>';
+		} );
+
 		$container.html( html );
 
-		// Load thumbnails via authenticated fetch
 		$container.find( 'img.fcai-thumb-img' ).each( function () {
 			loadThumbAuthenticated( this, $( this ).data( 'file-id' ) );
 		} );
 
-		// Click on thumbnail (delegated — survives re-render)
 		$container.off( 'click', '.fcai-thumb' ).on( 'click', '.fcai-thumb', function () {
 			var idx   = parseInt( $( this ).data( 'index' ), 10 );
 			var photo = state.photos[ idx ];
@@ -404,10 +445,9 @@
 			$container.find( '.fcai-thumb' ).removeClass( 'fcai-selected' );
 			$( this ).addClass( 'fcai-selected' );
 			renderDetail( photo );
-			$( '#fcai-detail' )[ 0 ] && $( '#fcai-detail' )[ 0 ].scrollIntoView( { behavior: 'smooth', block: 'start' } );
+			var $d = $( '#fcai-detail' );
+			if ( $d.length ) $d[ 0 ].scrollIntoView( { behavior: 'smooth', block: 'start' } );
 		} );
-
-		renderPager();
 	}
 
 	// Cache of already-fetched blob URLs (fileId → objectURL) to avoid re-fetching on re-render
@@ -739,35 +779,48 @@
 		cssCluster.href = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css';
 		document.head.appendChild( cssCluster );
 
-		// Leaflet JS
-		var script   = document.createElement( 'script' );
-		script.src   = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+		// Geocoder CSS
+		var cssGeo  = document.createElement( 'link' );
+		cssGeo.rel  = 'stylesheet';
+		cssGeo.href = 'https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css';
+		document.head.appendChild( cssGeo );
+
+		// Leaflet JS → MarkerCluster JS → Geocoder JS (sequential)
+		var script = document.createElement( 'script' );
+		script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
 		script.onload = function () {
-			// MarkerCluster JS
-			var scriptCluster   = document.createElement( 'script' );
-			scriptCluster.src   = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js';
-			scriptCluster.onload = function () {
-				leafletLoaded = true;
-				callback();
+			var sc2 = document.createElement( 'script' );
+			sc2.src = 'https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js';
+			sc2.onload = function () {
+				var sc3 = document.createElement( 'script' );
+				sc3.src = 'https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js';
+				sc3.onload = function () {
+					leafletLoaded = true;
+					callback();
+				};
+				document.head.appendChild( sc3 );
 			};
-			document.head.appendChild( scriptCluster );
+			document.head.appendChild( sc2 );
 		};
 		document.head.appendChild( script );
 	}
 
 	function switchToMap() {
 		state.viewMode = 'map';
-		$( '#fcai-view-toggle' ).text( '☰ Griglia' ).attr( 'title', 'Passa alla griglia' );
+		$( '#fcai-view-toggle' ).text( '☰ Griglia' );
+		$( '#fcai-grid-toolbar' ).hide();
 		$( '#fcai-grid-container' ).hide();
 		$( '#fcai-pager' ).hide();
+		$( '#fcai-detail' ).hide();
 		$( '#fcai-map-container' ).show();
 		loadLeaflet( renderMap );
 	}
 
 	function switchToGrid() {
 		state.viewMode = 'grid';
-		$( '#fcai-view-toggle' ).text( '🗺️ Mappa' ).attr( 'title', 'Passa alla mappa' );
+		$( '#fcai-view-toggle' ).text( '🗺️ Mappa' );
 		$( '#fcai-map-container' ).hide();
+		$( '#fcai-grid-toolbar' ).show();
 		$( '#fcai-pager' ).show();
 		$( '#fcai-grid-container' ).show();
 		$( '#fcai-detail' ).hide();
@@ -813,6 +866,20 @@
 				maxClusterRadius    : 50,
 			} );
 			leafletMap.addLayer( markerCluster );
+
+			// OSM geocoder (Nominatim) — same as the FantinMaps app
+			if ( window.L.Control && L.Control.Geocoder ) {
+				L.Control.geocoder( {
+					defaultMarkGeocode : false,
+					placeholder        : 'Cerca un luogo…',
+					geocoder           : L.Control.Geocoder.nominatim( {
+						geocodingQueryParams : { countrycodes: 'it', limit: 5 },
+					} ),
+					position           : 'topleft',
+				} ).on( 'markgeocode', function ( e ) {
+					leafletMap.fitBounds( e.geocode.bbox, { maxZoom: 13 } );
+				} ).addTo( leafletMap );
+			}
 		} else {
 			markerCluster.clearLayers();
 		}
