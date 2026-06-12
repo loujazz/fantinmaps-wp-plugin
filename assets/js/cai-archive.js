@@ -569,6 +569,7 @@
 			url         : settings.restUrl + 'import',
 			method      : 'POST',
 			contentType : 'application/json',
+			timeout     : 90000,
 			data        : JSON.stringify( {
 				drive_file_id : photo.fileId,
 				download_url  : photo.downloadUrl || '',
@@ -587,13 +588,16 @@
 				$status.html( '⏳ Inserimento in corso…' );
 				insertIntoPost( resp.id, $status );
 			},
-			error : function ( xhr ) {
+			error : function ( xhr, textStatus ) {
 				state.importing = false;
 				$btn.prop( 'disabled', false ).text( '📥 Inserisci nell\'articolo' );
-				var msg = 'Errore durante il download.';
+				var msg = textStatus === 'timeout'
+					? 'Timeout: il download ha impiegato troppo. Riprova.'
+					: 'Errore durante il download.';
 				try {
 					var body = JSON.parse( xhr.responseText );
 					if ( body.message ) msg = body.message;
+					else if ( body.data && body.data.status ) msg += ' (HTTP ' + body.data.status + ')';
 				} catch ( e ) {}
 				$status.html( '<span class="fcai-err">❌ ' + escHtml( msg ) + '</span>' );
 			},
@@ -827,6 +831,14 @@
 				var view = new wp.media.View( { controller: frame } );
 				view.$el.addClass( 'fcai-content-wrap' ).append( getPanel() );
 				content.view = view;
+			}, frame );
+
+			// Hide the native "Seleziona" button when on CAI tab (we have our own)
+			frame.on( 'content:activate:cai-archive', function () {
+				frame.$el.find( '.media-button-select, .media-button-insert' ).hide();
+			}, frame );
+			frame.on( 'content:deactivate:cai-archive', function () {
+				frame.$el.find( '.media-button-select, .media-button-insert' ).show();
 			}, frame );
 		};
 	}

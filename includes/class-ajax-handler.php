@@ -72,12 +72,10 @@ class FCAI_Ajax_Handler {
 			$filename = sanitize_file_name( $meta['name'] );
 		}
 
-		// Determine the best download URL:
-		// 1. Use downloadUrl from JSON if provided (original full-resolution file)
-		// 2. Fall back to Drive API ?alt=media
-		$fetch_url = ! empty( $download_url )
-			? $download_url
-			: 'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?alt=media';
+		// Always use the Drive API v3 endpoint with Bearer token.
+		// The downloadUrl from the JSON (drive.google.com/uc?export=download) is a
+		// browser-only URL that does not accept Bearer token auth server-side.
+		$fetch_url = 'https://www.googleapis.com/drive/v3/files/' . rawurlencode( $drive_file_id ) . '?alt=media';
 
 		// Download the file content from Drive
 		$tmp_file = wp_tempnam( $filename );
