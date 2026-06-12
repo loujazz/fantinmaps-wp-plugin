@@ -402,6 +402,85 @@
 	color: #d63638;
 }
 
+/* ── Accordion cards (grouped grid) ── */
+.fcai-accordion {
+	padding: 8px 12px;
+}
+
+.fcai-card {
+	margin-bottom: 8px;
+	border: 1px solid #ddd;
+	border-radius: 6px;
+	overflow: hidden;
+	background: #fff;
+}
+
+.fcai-card-header {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 8px 12px;
+	cursor: pointer;
+	background: #f5f5f5;
+	transition: background 0.15s;
+	user-select: none;
+}
+
+.fcai-card-header:hover {
+	background: #eaeaea;
+}
+
+.fcai-card.fcai-card-open .fcai-card-header {
+	background: #e8f0f8;
+	border-bottom: 1px solid #ccd9ea;
+}
+
+.fcai-card-cover {
+	flex-shrink: 0;
+}
+
+.fcai-card-cover img {
+	width: 56px;
+	height: 42px;
+	object-fit: cover;
+	border-radius: 3px;
+	display: block;
+	background: #e0e0e0;
+}
+
+.fcai-card-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.fcai-card-name {
+	display: block;
+	font-size: 13px;
+	color: #1a1a1a;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.fcai-card-count {
+	font-size: 11px;
+	color: #888;
+}
+
+.fcai-card-arrow {
+	flex-shrink: 0;
+	font-size: 11px;
+	color: #888;
+}
+
+.fcai-card-body {
+	padding: 0;
+}
+
+.fcai-card-body .fcai-grid {
+	padding: 10px 12px;
+}
+
 /* ── Responsive: hide detail side-by-side on small viewports ── */
 @media ( max-width: 640px ) {
 	.fcai-detail-inner {
